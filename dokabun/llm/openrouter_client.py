@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Mapping, Sequence
 
+import httpx
 from openai import AsyncOpenAI
 
 from dokabun.logging_utils import get_logger
@@ -34,6 +35,9 @@ class AsyncOpenRouterClient:
             max_retries: 一時的なエラー発生時の最大リトライ回数。
         """
 
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self.model = model
         self.max_retries = max_retries
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
@@ -88,3 +92,33 @@ class AsyncOpenRouterClient:
                 logger.warning("OpenRouter 呼び出しに失敗しました。再試行します (%s/%s)", attempt, self.max_retries)
                 await asyncio.sleep(delay)
                 delay *= 2
+
+    async def fetch_generation_cost(self, generation_id: str) -> float | None:
+        """GET /generation で合計コスト (USD) を取得する。
+
+        OpenRouter API reference: https://openrouter.ai/docs/api/api-reference/generations/get-generation
+
+        Args:
+            generation_id: `chat.completions.create` が返したリクエスト ID。
+
+        Returns:
+            float | None: 取得できた場合は USD 建ての合計コスト。失敗・未提供時は None。
+        """
+
+        url = f"{self.base_url}/generation"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        params = {"id": generation_id}
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:  # noqa: PERF203
+            logger.warning("生成コストの取得に失敗しました: %s", exc)
+            return None
+
+        payload = response.json()
+        total_cost = payload.get("data", {}).get("total_cost")
+        if isinstance(total_cost, (int, float)):
+            return float(total_cost)
+        return None
