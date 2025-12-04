@@ -79,18 +79,23 @@ class SpreadsheetReaderWriter:
             ValueError: 未対応の拡張子が指定された場合。
         """
 
-        if not self.input_path.exists():
-            raise FileNotFoundError(f"入力ファイルが見つかりません: {self.input_path}")
-
-        shutil.copy2(self.input_path, self.paths.copy_path)
-        logger.info("入力ファイルをコピーしました: %s", self.paths.copy_path)
-
-        if self.source_ext == ".xlsx":
-            df = pd.read_excel(self.paths.copy_path)
-        elif self.source_ext == ".csv":
-            df = pd.read_csv(self.paths.copy_path)
+        partial_path = self._find_latest_partial_path()
+        if partial_path:
+            logger.info("既存の一時ファイルを読み込みます: %s", partial_path)
+            df = pd.read_excel(partial_path)
         else:
-            raise ValueError(f"未対応のファイル形式です: {self.source_ext}")
+            if not self.input_path.exists():
+                raise FileNotFoundError(f"入力ファイルが見つかりません: {self.input_path}")
+
+            shutil.copy2(self.input_path, self.paths.copy_path)
+            logger.info("入力ファイルをコピーしました: %s", self.paths.copy_path)
+
+            if self.source_ext == ".xlsx":
+                df = pd.read_excel(self.paths.copy_path)
+            elif self.source_ext == ".csv":
+                df = pd.read_csv(self.paths.copy_path)
+            else:
+                raise ValueError(f"未対応のファイル形式です: {self.source_ext}")
 
         self._df = df
         return df.copy()
@@ -153,5 +158,37 @@ class SpreadsheetReaderWriter:
             return data
         except json.JSONDecodeError as exc:
             logger.warning("メタデータの読み込みに失敗しました (%s): %s", exc, self.paths.meta_path)
+            return None
+
+    def _find_latest_partial_path(self) -> Path | None:
+        """最新の一時ファイルのパスを返す。存在しなければ None。"""
+
+        pattern = f"{self.base_stem}_{self.timestamp}.partial.*.xlsx"
+        candidates: list[tuple[int, Path]] = []
+        for path in self.output_dir.glob(pattern):
+            range_info = self._parse_partial_range(path.name)
+            if range_info is None:
+                continue
+            _, end_row = range_info
+            candidates.append((end_row, path))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        return candidates[-1][1]
+
+    @staticmethod
+    def _parse_partial_range(filename: str) -> tuple[int, int] | None:
+        """partial ファイル名から (start, end) を取り出す。"""
+
+        try:
+            marker = ".partial."
+            start = filename.index(marker) + len(marker)
+            end = filename.rindex(".xlsx")
+            range_part = filename[start:end]
+            start_str, end_str = range_part.split("-", 1)
+            return int(start_str), int(end_str)
+        except (ValueError, IndexError):
             return None
 
