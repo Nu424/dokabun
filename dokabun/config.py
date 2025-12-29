@@ -22,6 +22,7 @@ class AppConfig:
         max_concurrency: 同時並列実行数（後続フェーズで利用）。
         max_rows: 実行あたりの最大処理行数。None なら制限なし。
         log_level: ルートロガーに適用するログレベル文字列。
+        max_text_file_bytes: テキストファイル読み込み時の最大サイズ（バイト）。デフォルトは 256KiB。
     """
 
     input_path: Path
@@ -34,6 +35,7 @@ class AppConfig:
     max_concurrency: int = 5
     max_rows: Optional[int] = None
     log_level: str = "INFO"
+    max_text_file_bytes: int = 262_144
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -53,6 +55,9 @@ class AppConfig:
 
         if self.max_rows is not None and self.max_rows <= 0:
             raise ValueError("max_rows は None または 1 以上である必要があります。")
+
+        if self.max_text_file_bytes <= 0:
+            raise ValueError("max_text_file_bytes は 1 以上である必要があります。")
 
     @property
     def log_file(self) -> Path:
@@ -74,6 +79,7 @@ class AppConfig:
             max_concurrency=self.max_concurrency,
             max_rows=self.max_rows,
             log_level=self.log_level,
+            max_text_file_bytes=self.max_text_file_bytes,
             extra=self.extra.copy(),
         )
 
@@ -99,8 +105,8 @@ class AppConfig:
             "max_concurrency",
             "max_rows",
             "log_level",
+            "max_text_file_bytes",
         }
         filtered = {key: value for key, value in data.items() if key in known_fields}
         extra = {key: value for key, value in data.items() if key not in known_fields}
         return cls(**filtered, extra=extra)
-

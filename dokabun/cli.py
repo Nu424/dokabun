@@ -76,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--timestamp",
         help="既存の実行を再開する際のタイムスタンプ。未指定時は最新を推定",
     )
+    parser.add_argument(
+        "--max-text-file-bytes",
+        dest="max_text_file_bytes",
+        type=int,
+        default=262_144,
+        help="テキストファイル読み込み時の最大サイズ（バイト） (default: 262144)",
+    )
     return parser
 
 
@@ -148,6 +155,7 @@ def _build_config_from_args(args: argparse.Namespace) -> AppConfig:
         "max_concurrency": args.concurrency,
         "max_rows": args.max_rows,
         "log_level": args.log_level,
+        "max_text_file_bytes": args.max_text_file_bytes,
     }
     return AppConfig.from_dict(data)
 

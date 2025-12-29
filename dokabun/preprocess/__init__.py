@@ -7,14 +7,25 @@ from typing import Iterable, Sequence
 
 from dokabun.preprocess.base import Preprocess
 from dokabun.preprocess.image import ImagePreprocess
-from dokabun.preprocess.text import PlainTextPreprocess
+from dokabun.preprocess.text import PlainTextPreprocess, TextFilePreprocess
 from dokabun.target import Target
 
 
-def build_default_preprocessors() -> list[Preprocess]:
-    """既定の前処理リストを生成する。"""
+def build_default_preprocessors(max_text_file_bytes: int = 262_144) -> list[Preprocess]:
+    """既定の前処理リストを生成する。
 
-    return [ImagePreprocess(), PlainTextPreprocess()]
+    Args:
+        max_text_file_bytes: テキストファイル読み込み時の最大サイズ（バイト）。
+
+    Returns:
+        list[Preprocess]: 前処理クラスのリスト。順序は重要（最初に適合したものが使われる）。
+    """
+
+    return [
+        ImagePreprocess(),
+        TextFilePreprocess(max_bytes=max_text_file_bytes),
+        PlainTextPreprocess(),
+    ]
 
 
 def run_preprocess_pipeline(

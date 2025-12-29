@@ -18,7 +18,8 @@ from dokabun.llm.openrouter_client import AsyncOpenRouterClient
 from dokabun.llm.prompt import build_prompt
 from dokabun.llm.schema import build_schema_from_headers
 from dokabun.logging_utils import get_logger
-from dokabun.preprocess import run_preprocess_pipeline
+from dokabun.preprocess import build_default_preprocessors, run_preprocess_pipeline
+from dokabun.preprocess.base import Preprocess
 from dokabun.target import Target
 
 logger = get_logger(__name__)
@@ -64,6 +65,7 @@ async def process_row_async(
     base_dir: Path,
     client: AsyncOpenRouterClient,
     config: AppConfig,
+    preprocessors: Sequence[Preprocess] | None = None,
 ) -> RowResult:
     """1 行分のスプレッドシートを非同期で処理する。
 
@@ -82,7 +84,7 @@ async def process_row_async(
     row = df.iloc[work_item.row_index]
     try:
         # ---ターゲット列を前処理する
-        targets = _build_targets(row, target_columns, base_dir)
+        targets = _build_targets(row, target_columns, base_dir, preprocessors)
         if not targets:
             raise ValueError("有効なターゲット列が存在しません。")
 
@@ -171,6 +173,7 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     semaphore = asyncio.Semaphore(config.max_concurrency)
     summary = ExecutionSummary()
     summary.start(total_rows=len(work_items))
+    preprocessors = build_default_preprocessors(max_text_file_bytes=config.max_text_file_bytes)
 
     async def _bounded_process(item: RowWorkItem) -> RowResult:
         async with semaphore:
@@ -181,6 +184,7 @@ async def run_async(config: AppConfig, api_key: str) -> None:
                 base_dir=reader.target_base_dir,
                 client=client,
                 config=config,
+                preprocessors=preprocessors,
             )
 
     # ---処理を並列実行する
@@ -340,13 +344,19 @@ def _is_empty_value(value: Any) -> bool:
     return bool(pd.isna(value))
 
 
-def _build_targets(row: pd.Series, target_columns: Sequence[str], base_dir: Path) -> list[Target]:
+def _build_targets(
+    row: pd.Series,
+    target_columns: Sequence[str],
+    base_dir: Path,
+    preprocessors: Sequence[Preprocess] | None = None,
+) -> list[Target]:
     """ターゲット列を前処理して Target オブジェクトを作成する。
 
     Args:
         row: 対象行の Pandas Series。
         target_columns: `t_` で始まるターゲット列名のシーケンス。
         base_dir: 相対パスを解決するための基準ディレクトリ。
+        preprocessors: 使用する前処理クラスのリスト。None の場合はデフォルトを使用。
 
     Returns:
         list[Target]: 前処理済みターゲットのリスト。
@@ -361,7 +371,7 @@ def _build_targets(row: pd.Series, target_columns: Sequence[str], base_dir: Path
         if _is_empty_value(value):
             continue
         try:
-            target = run_preprocess_pipeline(str(value), base_dir)
+            target = run_preprocess_pipeline(str(value), base_dir, preprocessors=preprocessors)
             targets.append(target)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ターゲット列 %s の前処理に失敗しました: %s", column, exc)
