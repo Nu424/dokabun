@@ -46,6 +46,56 @@
    メタファイルが存在する場合、CLI は最新タイムスタンプを自動で選択し途中再開します。  
    新規実行したい場合は `--timestamp` を指定するか、既存メタファイルを削除してください。
 
+## 開発者向け: 実行フロー（関数呼び出し）
+
+### 入口〜全体処理（CLI → runner）
+
+- `python -m dokabun` (`dokabun/__main__.py`)
+  - _CLIの処理_
+  - `dokabun.cli.main(argv)`
+    - `build_parser()` / `argparse` で引数を解釈
+    - `load_dotenv()`（`.env` があれば読み込み）
+    - `_build_config_from_args(args)` → `AppConfig.from_dict(...)`
+      - `--timestamp` 未指定時は `_detect_latest_timestamp(...)` で `output_dir` 内の `*.meta.json` から最新を推定
+    - `configure_logging(...)` / `_load_api_key()`
+    - _runner_
+    - `dokabun.core.runner.run(config, api_key)`
+      - `asyncio.run(run_async(config, api_key))`
+        - _再開処理_
+        - `SpreadsheetReaderWriter(config)` で `timestamp` を確定し、入出力パスを準備
+        - `reader.load_meta_if_exists()` → `last_completed_row` を読み、再開位置 `start_row_index` を決定
+        - _スプシの読み込み・列の分割_
+        - `df = reader.load()`
+          - `{stem}_{timestamp}.partial.*.xlsx` があれば最新を優先して読み込み
+          - 無ければ入力を `{stem}_{timestamp}{ext}` にコピーして読み込み（`.xlsx` / `.csv`）
+        - `_classify_columns(df)` で列を分類（`t_` / 構造化出力 / `ns_`・`nsf_`）
+        - `_collect_work_items(...)` で「未入力セルが残る行」だけを `RowWorkItem` として列挙
+        - `AsyncOpenRouterClient(...)` と `asyncio.Semaphore(max_concurrency)` を用意
+        - 各行をタスク化し、`asyncio.as_completed(...)` で完了順に回収
+          - 1行毎の処理は、`process_row_async(...)` で行う
+          - 結果は `df` に反映しつつ `ExecutionSummary` に成功/失敗・usage を集計
+          - `partial_interval` 行ごとに `reader.save_partial(df, start_row, end_row)`（一時保存＋meta更新）
+        - 最後に `reader.save_output(df)` で `{stem}_{timestamp}.out.xlsx` を保存し、サマリーを標準出力へ表示
+
+### 1 行の処理（`process_row_async`）
+
+- **ターゲット列の前処理**: `_build_targets(...)` → `run_preprocess_pipeline(...)`
+  - `ImagePreprocess` / `TextFilePreprocess` / `PlainTextPreprocess` の順で判定し、`Target`（`TextTarget`/`ImageTarget`）へ変換
+  - ファイルパスは `SpreadsheetReaderWriter.target_base_dir`（= 入力スプレッドシートのディレクトリ）からの相対として解決
+- **構造化出力（通常の出力列）**
+  - `build_schema_from_headers(pending_columns, name=...)` で LLM に渡す JSON Schema を生成
+    - `列名|説明` の場合も **`列名` 部分**をプロパティ名として列へマッピング
+  - `build_prompt(...)` → `client.create_completion(...)`（OpenRouter 経由で構造化出力を要求）
+  - 応答は `_extract_parsed_json(...)` で JSON 化し、対応する出力列に値を書き戻す
+- **非構造化出力（`ns_` / `nsf_`）**
+  - `_parse_ns_prompt(column)` で列名からプロンプト文を抽出 → `build_nonstructured_prompt(...)` → `client.create_completion_text(...)`
+  - `nsf_` は `output_dir` にファイル保存し、セルには相対ファイル名を書き込み（命名は `--nsf-name-template*` で制御）
+
+### 途中再開の考え方（`timestamp`）
+
+- 再開時は、`{stem}_{timestamp}.meta.json` の `last_completed_row` と、`{stem}_{timestamp}.partial.*.xlsx`（存在すればそれも）を基点に続きから処理します。
+- ただし各セルは `_is_empty_value(...)` で「空」と判定されたときだけ埋めるため、同じ `timestamp` で再実行しても既存値は基本的に上書きしません。
+
 ## スプレッドシート形式
 
 - 列名が `t_` で始まる列を **分析対象列** として扱います。複数ある場合は左から順にプロンプトへ渡されます。
