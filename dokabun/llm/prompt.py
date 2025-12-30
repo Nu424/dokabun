@@ -13,6 +13,7 @@ SYSTEM_MESSAGE = (
     "JSON を返すアシスタントです。必ず schema の required を満たし、"
     "追加のプロパティは出力しないでください。"
 )
+NONSTRUCTURED_SYSTEM_MESSAGE = "指示に従い、与えられた入力データを処理してください。"
 
 
 def build_prompt(
@@ -77,6 +78,8 @@ def _build_row_summary(row_index: int, row: pd.Series) -> str:
 
     lines = [f"行インデックス: {row_index}"]
     for column, value in row.items():
+        if isinstance(column, str) and (column.startswith("ns_") or column.startswith("nsf_")):
+            continue
         if pd.isna(value):
             value_str = ""
         else:
@@ -84,3 +87,27 @@ def _build_row_summary(row_index: int, row: pd.Series) -> str:
         lines.append(f"- {column}: {value_str}")
     return "\n".join(lines)
 
+
+def build_nonstructured_prompt(
+    prompt_text: str,
+    targets: Sequence[Target],
+    instructions: str | None = None,
+) -> list[dict[str, Any]]:
+    """非構造化出力向けのメッセージを生成する。"""
+
+    if not targets:
+        raise ValueError("targets が空です。少なくとも 1 つの分析対象が必要です。")
+
+    user_instruction = instructions or prompt_text
+    user_text = (
+        f"{user_instruction}\n\n"
+        "この後に処理対象のテキストや画像コンテンツが続きます。"
+    )
+    user_content = [{"type": "text", "text": user_text}]
+    user_content.extend(target.to_llm_content() for target in targets)
+
+    messages = [
+        {"role": "system", "content": NONSTRUCTURED_SYSTEM_MESSAGE},
+        {"role": "user", "content": user_content},
+    ]
+    return messages

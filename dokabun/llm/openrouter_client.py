@@ -93,6 +93,51 @@ class AsyncOpenRouterClient:
                 await asyncio.sleep(delay)
                 delay *= 2
 
+    async def create_completion_text(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        """プレーンテキスト応答のチャット補完を実行する。
+
+        Args:
+            messages: OpenAI SDK 互換のメッセージ配列。
+            temperature: 応答多様性を制御する温度。None ならモデル既定値。
+            max_tokens: 応答の最大トークン数。None ならモデル既定値。
+            extra_headers: OpenRouter に追加で渡すヘッダ。
+
+        Returns:
+            Any: OpenAI SDK が返すレスポンスオブジェクト。
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": list(messages),
+            "extra_headers": extra_headers or {},
+            "extra_body": {"usage": {"include": True}},
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        attempt = 0
+        delay = 1.0
+        while True:
+            try:
+                return await self.client.chat.completions.create(**payload)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                attempt += 1
+                if attempt > self.max_retries:
+                    logger.error("OpenRouter 呼び出しが失敗しました: %s", exc)
+                    raise
+                logger.warning("OpenRouter 呼び出しに失敗しました。再試行します (%s/%s)", attempt, self.max_retries)
+                await asyncio.sleep(delay)
+                delay *= 2
+
     async def fetch_generation_cost(self, generation_id: str) -> float | None:
         """GET /generation で合計コスト (USD) を取得する。
 

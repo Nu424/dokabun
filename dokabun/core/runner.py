@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -15,7 +16,7 @@ from dokabun.config import AppConfig
 from dokabun.core.summary import ExecutionSummary
 from dokabun.io.spreadsheet import SpreadsheetReaderWriter
 from dokabun.llm.openrouter_client import AsyncOpenRouterClient
-from dokabun.llm.prompt import build_prompt
+from dokabun.llm.prompt import build_nonstructured_prompt, build_prompt
 from dokabun.llm.schema import build_schema_from_headers
 from dokabun.logging_utils import get_logger
 from dokabun.preprocess import build_default_preprocessors, run_preprocess_pipeline
@@ -50,11 +51,13 @@ class RowWorkItem:
 
     Attributes:
         row_index: DataFrame 上の行インデックス。
-        pending_columns: まだ値が入っていない出力列の一覧。
+        pending_structured_columns: まだ値が入っていない構造化出力列。
+        pending_ns_columns: まだ値が入っていない非構造化出力列。
     """
 
     row_index: int
-    pending_columns: list[str]
+    pending_structured_columns: list[str]
+    pending_ns_columns: list[str]
 
 
 async def process_row_async(
@@ -65,6 +68,7 @@ async def process_row_async(
     base_dir: Path,
     client: AsyncOpenRouterClient,
     config: AppConfig,
+    nsf_index_map: dict[str, int],
     preprocessors: Sequence[Preprocess] | None = None,
 ) -> RowResult:
     """1 行分のスプレッドシートを非同期で処理する。
@@ -76,6 +80,7 @@ async def process_row_async(
         base_dir: 画像パスなどを解決する基準ディレクトリ。
         client: OpenRouter へ問い合わせる非同期クライアント。
         config: 温度や最大トークン数などを含むアプリ設定。
+        nsf_index_map: nsf 列に対する 1 始まりのインデックス。
 
     Returns:
         RowResult: 更新内容・usage・エラー情報を含む結果。
@@ -88,40 +93,104 @@ async def process_row_async(
         if not targets:
             raise ValueError("有効なターゲット列が存在しません。")
 
-        # ---出力形式を、ヘッダーから生成する
-        schema_payload = build_schema_from_headers(
-            work_item.pending_columns,
-            name=f"dokabun_row_{work_item.row_index}",
-        )
-        # ---プロンプトを用意する
-        messages, response_format = build_prompt(
-            work_item.row_index,
-            row,
-            targets,
-            schema_payload,
-        )
+        updates: dict[str, Any] = {}
+        usage_total: dict[str, Any] | None = None
+        errors: list[str] = []
 
-        # ---LLMに問い合わせる
-        response = await client.create_completion(
-            messages=messages,
-            json_schema=response_format["json_schema"],
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
-        )
+        # ---構造化出力（JSON Schema）が必要な場合のみ実行する
+        if work_item.pending_structured_columns:
+            # ---出力形式を、ヘッダーから生成する
+            schema_payload = build_schema_from_headers(
+                work_item.pending_structured_columns,
+                name=f"dokabun_row_{work_item.row_index}",
+            )
+            # ---プロンプトを生成する
+            messages, response_format = build_prompt(
+                work_item.row_index,
+                row,
+                targets,
+                schema_payload,
+            )
+            # ---LLMに問い合わせる
+            response = await client.create_completion(
+                messages=messages,
+                json_schema=response_format["json_schema"],
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+            )
+            # ---レスポンスをパースする
+            parsed = _extract_parsed_json(response)
+            usage = _coerce_usage_dict(getattr(response, "usage", None))
+            generation_id = getattr(response, "id", None)
+            # ---コストを取得する
+            if generation_id:
+                total_cost = await client.fetch_generation_cost(generation_id)
+                if total_cost is not None:
+                    usage = usage or {}
+                    usage["total_cost_usd"] = total_cost
+            # ---更新内容をビルドする
+            updates.update(_build_updates_from_parsed(parsed, work_item.pending_structured_columns))
+            usage_total = _merge_usage(usage_total, usage)
 
-        # ---レスポンスをパースする
-        parsed = _extract_parsed_json(response)
-        usage = _coerce_usage_dict(getattr(response, "usage", None))
-        generation_id = getattr(response, "id", None)
-        # ---コストを取得する
-        if generation_id:
-            total_cost = await client.fetch_generation_cost(generation_id)
-            if total_cost is not None:
-                usage = usage or {}
-                usage["total_cost_usd"] = total_cost
-        # ---更新内容を生成する
-        updates = _build_updates_from_parsed(parsed, work_item.pending_columns)
-        return RowResult(row_index=work_item.row_index, updates=updates, usage=usage)
+        # ---非構造化出力（ns_/nsf_）を列ごとに実行する
+        if work_item.pending_ns_columns:
+            row_no_1based = work_item.row_index + 1
+            target_file_stem = _guess_target_file_stem(row, target_columns, base_dir)
+            for ns_column in work_item.pending_ns_columns:
+                try:
+                    # ---非構造化出力用のプロンプトを用意し、LLMに問い合わせる
+                    prompt_text = _parse_ns_prompt(ns_column)
+                    ns_messages = build_nonstructured_prompt(prompt_text, targets)
+                    ns_response = await client.create_completion_text(
+                        messages=ns_messages,
+                        temperature=config.temperature,
+                        max_tokens=config.max_tokens,
+                    )
+                    # ---使用量・コストを取得する
+                    ns_usage = _coerce_usage_dict(getattr(ns_response, "usage", None))
+                    ns_generation_id = getattr(ns_response, "id", None)
+                    if ns_generation_id:
+                        total_cost = await client.fetch_generation_cost(ns_generation_id)
+                        if total_cost is not None:
+                            ns_usage = ns_usage or {}
+                            ns_usage["total_cost_usd"] = total_cost
+                    # ---出力結果を取得する
+                    content_text = _extract_text_content(ns_response)
+
+                    # ---nsf_列の場合、出力結果をファイルに保存する
+                    if ns_column.startswith("nsf_"):
+                        # ---ファイル名を準備する
+                        nsf_index = nsf_index_map.get(ns_column, 1)
+                        filename = _build_nsf_filename(
+                            nsf_index=nsf_index,
+                            row_no=row_no_1based,
+                            ext=config.nsf_ext,
+                            target_file_stem=target_file_stem,
+                            use_filetarget_template=target_file_stem is not None,
+                            name_template=config.nsf_name_template,
+                            name_template_filetarget=config.nsf_name_template_filetarget,
+                        )
+                        # ---ファイルに保存する
+                        output_path = (config.output_dir / filename).resolve()
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        output_path.write_text(content_text, encoding="utf-8")
+                        updates[ns_column] = filename
+                    else:
+                        updates[ns_column] = content_text
+
+                    usage_total = _merge_usage(usage_total, ns_usage)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{ns_column}: {exc}")
+
+        error_msg = "; ".join(errors) if errors else None
+        error_type = "PartialError" if errors else None
+        return RowResult(
+            row_index=work_item.row_index,
+            updates=updates,
+            usage=usage_total,
+            error=error_msg,
+            error_type=error_type,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("行 %s の処理に失敗しました: %s", work_item.row_index, exc)
         return RowResult(
@@ -156,10 +225,16 @@ async def run_async(config: AppConfig, api_key: str) -> None:
 
     # ---処理対象・出力列をわけ、処理が必要な部分を抽出する
     df = reader.load()
-    target_columns, output_columns = _classify_columns(df)
+    (
+        target_columns,
+        structured_columns,
+        ns_columns,
+        nsf_index_map,
+    ) = _classify_columns(df)
     work_items = _collect_work_items(
         df,
-        output_columns,
+        structured_columns=structured_columns,
+        ns_columns=ns_columns,
         start_row_index=start_row_index,
         max_rows=config.max_rows,
     )
@@ -184,6 +259,7 @@ async def run_async(config: AppConfig, api_key: str) -> None:
                 base_dir=reader.target_base_dir,
                 client=client,
                 config=config,
+                nsf_index_map=nsf_index_map,
                 preprocessors=preprocessors,
             )
 
@@ -203,6 +279,10 @@ async def run_async(config: AppConfig, api_key: str) -> None:
         result = await future
         processed += 1
 
+        # ---成功分の更新はエラーがあっても反映する
+        for column, value in result.updates.items():
+            df.loc[result.row_index, column] = value
+
         if result.error:
             logger.error("行 %s の処理に失敗しました: %s", result.row_index, result.error)
             summary.record_failure(
@@ -211,9 +291,6 @@ async def run_async(config: AppConfig, api_key: str) -> None:
                 result.error,
             )
         else:
-            # ---エラーでない場合は、更新内容を反映する
-            for column, value in result.updates.items():
-                df.loc[result.row_index, column] = value
             summary.record_success(result.row_index, result.usage)
 
         # ---部分的な保存のため、処理範囲を更新する
@@ -263,25 +340,59 @@ def run(config: AppConfig, api_key: str) -> None:
         raise
 
 
-def _classify_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """DataFrame の列をターゲット列と出力列に分類する。
+def _classify_columns(
+    df: pd.DataFrame,
+) -> tuple[list[str], list[str], list[str], dict[str, int]]:
+    """DataFrame の列をターゲット列・構造化出力列・非構造化列に分類する。
 
     Args:
         df: スプレッドシートから読み込んだ DataFrame。
 
     Returns:
-        tuple[list[str], list[str]]: (ターゲット列, 出力列) のタプル。
+        tuple[list[str], list[str], list[str], dict[str, int]]:
+            (ターゲット列, 構造化出力列, 非構造化列, nsf列のインデックスマップ)
+    Notes:
+        nsf列のインデックスマップは、以下のような形式である
+        ```
+        {
+            "{nsfな列名}": {その列のインデックス(1始まり)},
+            "nsf_2": 2,
+            "nsf_3": 3,
+            ...
+        }
+        ```
     """
 
-    target_columns = [col for col in df.columns if isinstance(col, str) and col.startswith("t_")]
-    output_columns = [col for col in df.columns if col not in target_columns]
-    return target_columns, output_columns
+    target_columns: list[str] = []
+    structured_columns: list[str] = []
+    ns_columns: list[str] = []
+    nsf_index_map: dict[str, int] = {}
+    nsf_counter = 0
+
+    for col in df.columns:
+        if not isinstance(col, str):
+            continue
+        if col.startswith("t_"):
+            target_columns.append(col)
+            continue
+        if col.startswith("nsf_"):
+            ns_columns.append(col)
+            nsf_counter += 1
+            nsf_index_map[col] = nsf_counter
+            continue
+        if col.startswith("ns_"):
+            ns_columns.append(col)
+            continue
+        structured_columns.append(col)
+
+    return target_columns, structured_columns, ns_columns, nsf_index_map
 
 
 def _collect_work_items(
     df: pd.DataFrame,
-    output_columns: Sequence[str],
     *,
+    structured_columns: Sequence[str],
+    ns_columns: Sequence[str],
     start_row_index: int,
     max_rows: int | None,
 ) -> list[RowWorkItem]:
@@ -289,7 +400,8 @@ def _collect_work_items(
 
     Args:
         df: スプレッドシート全体の DataFrame。
-        output_columns: 出力列名のシーケンス。
+        structured_columns: 構造化出力列名のシーケンス。
+        ns_columns: 非構造化出力列名のシーケンス。
         start_row_index: 探索を開始する行インデックス（再開用）。
         max_rows: この実行で処理する最大行数。制限なしは ``None``。
 
@@ -300,9 +412,16 @@ def _collect_work_items(
     work_items: list[RowWorkItem] = []
     for row_index in range(start_row_index, len(df)):
         row = df.iloc[row_index]
-        pending = _get_pending_columns(row, output_columns)
-        if pending:
-            work_items.append(RowWorkItem(row_index=row_index, pending_columns=pending))
+        pending_structured = _get_pending_columns(row, structured_columns)
+        pending_ns = _get_pending_columns(row, ns_columns)
+        if pending_structured or pending_ns:
+            work_items.append(
+                RowWorkItem(
+                    row_index=row_index,
+                    pending_structured_columns=pending_structured,
+                    pending_ns_columns=pending_ns,
+                )
+            )
             if max_rows is not None and len(work_items) >= max_rows:
                 break
     return work_items
@@ -485,3 +604,126 @@ def _coerce_usage_dict(usage: Any) -> dict[str, Any] | None:
         return usage.__dict__
     return None
 
+
+def _parse_ns_prompt(column: str) -> str:
+    """ns_/nsf_ 列ヘッダーからプロンプト文を抽出する。"""
+
+    stripped = column
+    if stripped.startswith("nsf_"):
+        stripped = stripped[len("nsf_") :]
+    elif stripped.startswith("ns_"):
+        stripped = stripped[len("ns_") :]
+    if "|" in stripped:
+        stripped, _ = stripped.split("|", 1)
+    prompt = stripped.strip()
+    return prompt or "与えられた入力を処理してください。"
+
+
+def _extract_text_content(response: Any) -> str:
+    """OpenAI SDK のレスポンスからテキストを取り出す。"""
+
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ValueError("LLM 応答に choices が含まれていません。")
+
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        raise ValueError("LLM 応答に message が含まれていません。")
+
+    content = getattr(message, "content", None)
+    if content is None:
+        raise ValueError("LLM 応答から content を取得できませんでした。")
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+        if text_parts:
+            return "".join(text_parts)
+
+    raise ValueError("未対応の LLM 応答形式です。")
+
+
+def _merge_usage(
+    base: dict[str, Any] | None, add: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """usage を合算する。"""
+
+    if add is None:
+        return base
+    if base is None:
+        return dict(add)
+
+    merged = dict(base)
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        merged[key] = int(merged.get(key, 0) or 0) + int(add.get(key, 0) or 0)
+    for cost_key in ("total_cost_usd", "total_cost"):
+        merged[cost_key] = float(merged.get(cost_key, 0.0) or 0.0) + float(
+            add.get(cost_key, 0.0) or 0.0
+        )
+    return merged
+
+
+def _guess_target_file_stem(
+    row: pd.Series, target_columns: Sequence[str], base_dir: Path
+) -> str | None:
+    """t_ 列が 1 つだけで、ファイルパスなら stem を返す。nsfの出力ファイル名の判定に用いる"""
+
+    if len(target_columns) != 1:
+        return None
+    raw = row.get(target_columns[0])
+    if _is_empty_value(raw):
+        return None
+    path = Path(str(raw))
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    if path.exists():
+        return path.stem
+    return None
+
+
+def _build_nsf_filename(
+    *,
+    nsf_index: int,
+    row_no: int,
+    ext: str,
+    target_file_stem: str | None,
+    use_filetarget_template: bool,
+    name_template: str,
+    name_template_filetarget: str,
+) -> str:
+    """nsf 用のファイル名を生成する。
+    
+    Args:
+        nsf_index: nsf_index
+        row_no: 行番号
+        ext: 拡張子
+        target_file_stem: t_列のファイル名のstem
+        use_filetarget_template: filenameに、t_列のファイル名のstemを使用するかどうか({ファイル名}_nsf{nsf_index}.{ext}にするか？)
+        name_template: ファイル名のテンプレート
+        name_template_filetarget: t_列のファイル名のstemを使用する場合のファイル名のテンプレート
+    """
+
+    clean_ext = ext.lstrip(".")
+    template = name_template_filetarget if use_filetarget_template else name_template
+    filename = template.format(
+        nsf_index=nsf_index,
+        row_no=row_no,
+        ext=clean_ext,
+        target_file_stem=target_file_stem or "",
+    )
+    filename = _sanitize_filename(filename)
+    if not filename.lower().endswith(f".{clean_ext}"):
+        filename = f"{filename}.{clean_ext}"
+    return filename
+
+
+def _sanitize_filename(name: str) -> str:
+    """Windows でも扱えるように簡易サニタイズする。"""
+
+    sanitized = re.sub(r'[<>:"/\\|?*\r\n]', "_", name).strip()
+    return sanitized or "output"

@@ -83,6 +83,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=262_144,
         help="テキストファイル読み込み時の最大サイズ（バイト） (default: 262144)",
     )
+    parser.add_argument(
+        "--nsf-ext",
+        dest="nsf_ext",
+        choices=["txt", "md"],
+        default="txt",
+        help="nsf_ 列で保存するファイルの拡張子 (default: txt)",
+    )
+    parser.add_argument(
+        "--nsf-name-template",
+        dest="nsf_name_template",
+        default="nsf{nsf_index}_{row_no}.{ext}",
+        help="nsf_ 出力ファイルの命名テンプレート",
+    )
+    parser.add_argument(
+        "--nsf-name-template-filetarget",
+        dest="nsf_name_template_filetarget",
+        default="{target_file_stem}_nsf{nsf_index}.{ext}",
+        help="t_ が単一ファイルパスの場合の命名テンプレート",
+    )
     return parser
 
 
@@ -156,6 +175,9 @@ def _build_config_from_args(args: argparse.Namespace) -> AppConfig:
         "max_rows": args.max_rows,
         "log_level": args.log_level,
         "max_text_file_bytes": args.max_text_file_bytes,
+        "nsf_ext": args.nsf_ext,
+        "nsf_name_template": args.nsf_name_template,
+        "nsf_name_template_filetarget": args.nsf_name_template_filetarget,
     }
     return AppConfig.from_dict(data)
 
