@@ -47,6 +47,8 @@
    - `input_YYYYMMDD_HHMMSS.out.xlsx` … 処理後の最終出力
    - `input_YYYYMMDD_HHMMSS.partial.*.xlsx` … 一時保存ファイル
    - `input_YYYYMMDD_HHMMSS.meta.json` … 再開用メタデータ
+   - `input_YYYYMMDD_HHMMSS.generations.jsonl` … LLM 呼び出しの generation_id ログ
+   - `input_YYYYMMDD_HHMMSS.generation_costs.jsonl` … `/generation` 再取得キャッシュ
 
    メタファイルが存在する場合、CLI は最新タイムスタンプを自動で選択し途中再開します。  
    新規実行したい場合は `--timestamp` を指定するか、既存メタファイルを削除してください。
@@ -100,6 +102,7 @@
 
 - 再開時は、`{stem}_{timestamp}.meta.json` の `last_completed_row` と、`{stem}_{timestamp}.partial.*.xlsx`（存在すればそれも）を基点に続きから処理します。
 - ただし各セルは `_is_empty_value(...)` で「空」と判定されたときだけ埋めるため、同じ `timestamp` で再実行しても既存値は基本的に上書きしません。
+- LLM 呼び出しの **課金コストは `/generation` で後から確定**させるため、generation_id を JSONL で永続化し、実行末尾にまとめて再取得します。`--timestamp` を指定した再実行でもコストだけ再計算されます（行処理がなくてもコスト再計算だけ動きます）。
 
 ## スプレッドシート形式
 

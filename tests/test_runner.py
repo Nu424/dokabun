@@ -74,7 +74,7 @@ async def test_process_row_async_returns_updates(tmp_path):
     assert result.error is None
     assert result.updates["summary|本文の要約"] == "短い要約"
     assert result.usage["total_tokens"] == 8
-    assert result.usage["total_cost_usd"] == pytest.approx(0.001)
+    assert result.generation_ids == ["gen-test-1"]
 
 
 @pytest.mark.asyncio
@@ -111,4 +111,4 @@ async def test_process_row_async_handles_ns_and_nsf(tmp_path):
     saved_path = output_dir / result.updates["nsf_detail"]
     assert saved_path.exists()
     assert saved_path.read_text(encoding="utf-8") == "non structured response"
-
+    assert result.generation_ids == ["gen-test-1", "gen-test-2"]

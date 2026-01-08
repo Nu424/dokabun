@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -43,6 +43,7 @@ class RowResult:
     usage: dict[str, Any] | None = None
     error: str | None = None
     error_type: str | None = None
+    generation_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -96,6 +97,7 @@ async def process_row_async(
         updates: dict[str, Any] = {}
         usage_total: dict[str, Any] | None = None
         errors: list[str] = []
+        generation_ids: list[str] = []
 
         # ---構造化出力（JSON Schema）が必要な場合のみ実行する
         if work_item.pending_structured_columns:
@@ -120,14 +122,10 @@ async def process_row_async(
             )
             # ---レスポンスをパースする
             parsed = _extract_parsed_json(response)
-            usage = _coerce_usage_dict(getattr(response, "usage", None))
+            usage = _strip_cost_keys(_coerce_usage_dict(getattr(response, "usage", None)))
             generation_id = getattr(response, "id", None)
-            # ---コストを取得する
             if generation_id:
-                total_cost = await client.fetch_generation_cost(generation_id)
-                if total_cost is not None:
-                    usage = usage or {}
-                    usage["total_cost_usd"] = total_cost
+                generation_ids.append(str(generation_id))
             # ---更新内容をビルドする
             updates.update(_build_updates_from_parsed(parsed, work_item.pending_structured_columns))
             usage_total = _merge_usage(usage_total, usage)
@@ -147,13 +145,12 @@ async def process_row_async(
                         max_tokens=config.max_tokens,
                     )
                     # ---使用量・コストを取得する
-                    ns_usage = _coerce_usage_dict(getattr(ns_response, "usage", None))
+                    ns_usage = _strip_cost_keys(
+                        _coerce_usage_dict(getattr(ns_response, "usage", None))
+                    )
                     ns_generation_id = getattr(ns_response, "id", None)
                     if ns_generation_id:
-                        total_cost = await client.fetch_generation_cost(ns_generation_id)
-                        if total_cost is not None:
-                            ns_usage = ns_usage or {}
-                            ns_usage["total_cost_usd"] = total_cost
+                        generation_ids.append(str(ns_generation_id))
                     # ---出力結果を取得する
                     content_text = _extract_text_content(ns_response)
 
@@ -190,6 +187,7 @@ async def process_row_async(
             usage=usage_total,
             error=error_msg,
             error_type=error_type,
+            generation_ids=generation_ids,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("行 %s の処理に失敗しました: %s", work_item.row_index, exc)
@@ -199,6 +197,7 @@ async def process_row_async(
             usage=None,
             error=str(exc),
             error_type=exc.__class__.__name__,
+            generation_ids=[],
         )
 
 
@@ -224,6 +223,17 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     last_completed_row = meta.get("last_completed_row")
     start_row_index = int(last_completed_row) + 1 if last_completed_row is not None else 0
 
+    # ---generation_id 永続化用のパスを用意する
+    generation_log_path = (
+        reader.output_dir / f"{reader.base_stem}_{reader.timestamp}.generations.jsonl"
+    )
+    cost_cache_path = (
+        reader.output_dir / f"{reader.base_stem}_{reader.timestamp}.generation_costs.jsonl"
+    )
+    generation_log_path.parent.mkdir(parents=True, exist_ok=True)
+    generation_log_path.touch(exist_ok=True)
+    cost_cache_path.parent.mkdir(parents=True, exist_ok=True)
+
     # ---処理対象・出力列をわけ、処理が必要な部分を抽出する
     df = reader.load()
     (
@@ -240,10 +250,6 @@ async def run_async(config: AppConfig, api_key: str) -> None:
         max_rows=config.max_rows,
     )
 
-    if not work_items:
-        logger.info("処理対象の行が存在しません。")
-        return
-
     # ---LLM処理(並列)を準備する
     client = AsyncOpenRouterClient(
         api_key=api_key,
@@ -254,6 +260,22 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     summary = ExecutionSummary()
     summary.start(total_rows=len(work_items))
     preprocessors = build_default_preprocessors(max_text_file_bytes=config.max_text_file_bytes)
+
+    # 処理対象が無い場合でも generation のコストだけ再計算する
+    if not work_items:
+        logger.info("処理対象の行が存在しません。コスト再取得のみ実行します。")
+        run_cost_usd, total_cost_usd, pending_count = await _reconcile_generation_costs(
+            client=client,
+            generation_log_path=generation_log_path,
+            cost_cache_path=cost_cache_path,
+            run_generation_ids=[],
+            max_concurrency=min(config.max_concurrency * 2, 20),
+        )
+        if total_cost_usd or pending_count:
+            logger.info(
+                "コスト再取得: total=$%.6f pending=%s", total_cost_usd, pending_count
+            )
+        return
 
     async def _bounded_process(item: RowWorkItem) -> RowResult:
         async with semaphore:
@@ -273,6 +295,7 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     processed = 0
     chunk_first_row: int | None = None
     chunk_last_row: int | None = None
+    new_generation_ids_run: list[str] = []
 
     # ---処理結果を取得する
     for future in tqdm(
@@ -298,6 +321,10 @@ async def run_async(config: AppConfig, api_key: str) -> None:
         else:
             summary.record_success(result.row_index, result.usage)
 
+        if result.generation_ids:
+            _append_jsonl(generation_log_path, [{"id": gid} for gid in result.generation_ids])
+            new_generation_ids_run.extend(result.generation_ids)
+
         # ---部分的な保存のため、処理範囲を更新する
         chunk_first_row = (
             result.row_index
@@ -321,10 +348,26 @@ async def run_async(config: AppConfig, api_key: str) -> None:
 
     # ---最終版を保存する
     reader.save_output(df)
+
+    # ---コストを末尾でまとめて再取得する
+    run_cost_usd, total_cost_usd, pending_count = await _reconcile_generation_costs(
+        client=client,
+        generation_log_path=generation_log_path,
+        cost_cache_path=cost_cache_path,
+        run_generation_ids=new_generation_ids_run,
+        max_concurrency=min(config.max_concurrency * 2, 20),
+    )
+    summary.total_cost_usd += run_cost_usd
     summary.finish()
     summary_text = summary.format_text()
     logger.info("処理が完了しました。対象行: %s", len(work_items))
     logger.info("\n%s", summary_text)
+    logger.info(
+        "コスト再取得: run=$%.6f total=$%.6f pending=%s",
+        run_cost_usd,
+        total_cost_usd,
+        pending_count,
+    )
     print(summary_text)
 
 
@@ -610,6 +653,21 @@ def _coerce_usage_dict(usage: Any) -> dict[str, Any] | None:
     return None
 
 
+def _strip_cost_keys(usage: dict[str, Any] | None) -> dict[str, Any] | None:
+    """usage 辞書からコスト系キーを除外する。
+
+    OpenRouter の /generation で後から確定させるため、LLM 応答直後の
+    total_cost* はここで捨てる。
+    """
+
+    if usage is None:
+        return None
+    cleaned = dict(usage)
+    cleaned.pop("total_cost_usd", None)
+    cleaned.pop("total_cost", None)
+    return cleaned
+
+
 def _parse_ns_prompt(column: str) -> str:
     """ns_/nsf_ 列ヘッダーからプロンプト文を抽出する。"""
 
@@ -732,3 +790,142 @@ def _sanitize_filename(name: str) -> str:
 
     sanitized = re.sub(r'[<>:"/\\|?*\r\n]', "_", name).strip()
     return sanitized or "output"
+
+
+# ---generation / cost 取得の補助関数群
+
+
+def _append_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    """JSONL 形式でレコードを追記する。"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False))
+            f.write("\n")
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """JSONL ファイルを読み込む。"""
+
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def _unique_preserve(seq: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in seq:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+async def _reconcile_generation_costs(
+    *,
+    client: AsyncOpenRouterClient,
+    generation_log_path: Path,
+    cost_cache_path: Path,
+    run_generation_ids: Sequence[str],
+    max_concurrency: int = 10,
+    max_rounds: int = 4,
+    initial_delay: float = 0.5,
+) -> tuple[float, float, int]:
+    """generation_id に対するコストをまとめて再取得する。
+
+    Returns:
+        (run_cost_usd, total_cost_usd, pending_count)
+    """
+
+    # ---生成のログjsonlを読み込み、generation_idを取得する
+    all_generation_records = _read_jsonl(generation_log_path)
+    generation_ids_all = _unique_preserve(
+        [rec.get("id", "") for rec in all_generation_records if rec.get("id")]
+    )
+    if not generation_ids_all:
+        return 0.0, 0.0, 0
+
+    # ---cost_cache_pathのjsonlを読み込み、キャッシュからgeneration_idとcostを取得する
+    cost_records = _read_jsonl(cost_cache_path)
+    cache: dict[str, dict[str, Any]] = {
+        rec["id"]: rec for rec in cost_records if isinstance(rec, dict) and rec.get("id")
+    }
+
+    # ---キャッシュにないgeneration_idをpending_idsに追加する
+    pending_ids: list[str] = []
+    for gen_id in generation_ids_all:
+        rec = cache.get(gen_id)
+        if rec is None or rec.get("status") != "ok":
+            pending_ids.append(gen_id)
+
+    # ---すべてコスト取得済みの場合、最終的なコストを計算・返却する
+    if not pending_ids:
+        total_cost = sum(float(cache[gid].get("total_cost", 0.0) or 0.0) for gid in cache)
+        run_cost = sum(
+            float(cache.get(gid, {}).get("total_cost", 0.0) or 0.0)
+            for gid in _unique_preserve(run_generation_ids)
+            if cache.get(gid, {}).get("status") == "ok"
+        )
+        pending_count = len(
+            [gid for gid in generation_ids_all if cache.get(gid, {}).get("status") != "ok"]
+        )
+        return run_cost, total_cost, pending_count
+
+    # ---コスト取得を並列実行する
+    semaphore = asyncio.Semaphore(max_concurrency) # セマフォで並列数を制限する
+
+    async def _fetch(gen_id: str) -> tuple[str, float | None]:
+        async with semaphore:
+            cost = await client.fetch_generation_cost(gen_id)
+            return gen_id, cost
+
+    current_pending = pending_ids
+    for round_index in range(max_rounds):
+        results = await asyncio.gather(*[_fetch(gen_id) for gen_id in current_pending])
+        next_pending: list[str] = []
+        for gen_id, cost in results:
+            if cost is None or (cost == 0 and round_index < max_rounds - 1):
+                cache[gen_id] = {"id": gen_id, "total_cost": cost, "status": "pending"}
+                next_pending.append(gen_id)
+                continue
+            cache[gen_id] = {"id": gen_id, "total_cost": cost or 0.0, "status": "ok"}
+        if not next_pending:
+            break
+        current_pending = next_pending
+        await asyncio.sleep(initial_delay * (2**round_index))
+
+    # 書き戻す（generation_log の順序を優先）
+    ordered_records: list[dict[str, Any]] = []
+    for gen_id in generation_ids_all:
+        rec = cache.get(gen_id, {"id": gen_id, "status": "pending", "total_cost": None})
+        ordered_records.append(rec)
+    cost_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cost_cache_path.open("w", encoding="utf-8") as f: # キャッシュを更新する
+        for rec in ordered_records:
+            f.write(json.dumps(rec, ensure_ascii=False))
+            f.write("\n")
+
+    # ---最終的なコストを計算・返却する
+    total_cost = sum(
+        float(rec.get("total_cost", 0.0) or 0.0) for rec in ordered_records if rec.get("status") == "ok"
+    )
+    run_cost = sum(
+        float(cache.get(gid, {}).get("total_cost", 0.0) or 0.0)
+        for gid in _unique_preserve(run_generation_ids)
+        if cache.get(gid, {}).get("status") == "ok"
+    )
+    pending_count = len([rec for rec in ordered_records if rec.get("status") != "ok"])
+    return run_cost, total_cost, pending_count
