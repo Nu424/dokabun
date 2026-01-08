@@ -40,6 +40,7 @@ class AsyncOpenRouterClient:
         self.timeout = timeout
         self.model = model
         self.max_retries = max_retries
+        self._is_openrouter = "openrouter.ai" in self.base_url
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     async def create_completion(
@@ -72,8 +73,9 @@ class AsyncOpenRouterClient:
             "messages": list(messages),
             "response_format": {"type": "json_schema", "json_schema": json_schema},
             "extra_headers": extra_headers or {},
-            "extra_body": {"usage": {"include": True}},
         }
+        if self._is_openrouter:
+            payload["extra_body"] = {"usage": {"include": True}}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
@@ -117,8 +119,9 @@ class AsyncOpenRouterClient:
             "model": self.model,
             "messages": list(messages),
             "extra_headers": extra_headers or {},
-            "extra_body": {"usage": {"include": True}},
         }
+        if self._is_openrouter:
+            payload["extra_body"] = {"usage": {"include": True}}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
@@ -149,6 +152,9 @@ class AsyncOpenRouterClient:
         Returns:
             float | None: 取得できた場合は USD 建ての合計コスト。失敗・未提供時は None。
         """
+
+        if not self._is_openrouter:
+            return None
 
         url = f"{self.base_url}/generation"
         headers = {"Authorization": f"Bearer {self.api_key}"}

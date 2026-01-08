@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model", default="openai/gpt-4.1-mini", help="使用するモデル名"
     )
+    parser.add_argument(
+        "--base-url",
+        dest="base_url",
+        default="https://openrouter.ai/api/v1",
+        help="LLM API のベース URL (default: https://openrouter.ai/api/v1)",
+    )
     parser.add_argument("--temperature", type=float, default=None, help="モデル温度")
     parser.add_argument(
         "--max-tokens", dest="max_tokens", type=int, default=None, help="最大トークン数"
@@ -169,6 +175,7 @@ def _build_config_from_args(args: argparse.Namespace) -> AppConfig:
         "timestamp": timestamp,
         "partial_interval": args.partial_interval,
         "model": args.model,
+        "base_url": args.base_url,
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
         "max_concurrency": args.concurrency,

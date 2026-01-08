@@ -17,6 +17,7 @@ class AppConfig:
         timestamp: 実行ごとに採番されるタイムスタンプ文字列。フェーズ2で設定。
         partial_interval: 何行処理ごとに一時ファイルを保存するか。
         model: OpenRouter 経由で利用するモデル名。
+        base_url: LLM API のベース URL。既定は OpenRouter。
         temperature: LLM 呼び出し時の温度パラメータ。
         max_tokens: LLM 応答の最大トークン数。
         max_concurrency: 同時並列実行数（後続フェーズで利用）。
@@ -33,6 +34,7 @@ class AppConfig:
     timestamp: Optional[str] = None
     partial_interval: int = 100
     model: str = "openai/gpt-4.1-mini"
+    base_url: str = "https://openrouter.ai/api/v1"
     temperature: float | None = None
     max_tokens: Optional[int] = None
     max_concurrency: int = 5
@@ -69,6 +71,8 @@ class AppConfig:
         if self.nsf_ext not in {"txt", "md"}:
             raise ValueError("nsf_ext は txt または md を指定してください。")
 
+        self.base_url = self.base_url.rstrip("/") or "https://openrouter.ai/api/v1"
+
     @property
     def log_file(self) -> Path:
         """ログファイルの保存先を返す。"""
@@ -84,6 +88,7 @@ class AppConfig:
             timestamp=timestamp,
             partial_interval=self.partial_interval,
             model=self.model,
+            base_url=self.base_url,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             max_concurrency=self.max_concurrency,
@@ -113,6 +118,7 @@ class AppConfig:
             "timestamp",
             "partial_interval",
             "model",
+            "base_url",
             "temperature",
             "max_tokens",
             "max_concurrency",

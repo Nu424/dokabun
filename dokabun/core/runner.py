@@ -211,9 +211,10 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     """
 
     logger.info(
-        "処理を開始します: input=%s model=%s concurrency=%s",
+        "処理を開始します: input=%s model=%s base_url=%s concurrency=%s",
         config.input_path,
         config.model,
+        config.base_url,
         config.max_concurrency,
     )
 
@@ -244,7 +245,11 @@ async def run_async(config: AppConfig, api_key: str) -> None:
         return
 
     # ---LLM処理(並列)を準備する
-    client = AsyncOpenRouterClient(api_key=api_key, model=config.model)
+    client = AsyncOpenRouterClient(
+        api_key=api_key,
+        model=config.model,
+        base_url=config.base_url,
+    )
     semaphore = asyncio.Semaphore(config.max_concurrency)
     summary = ExecutionSummary()
     summary.start(total_rows=len(work_items))

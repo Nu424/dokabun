@@ -17,6 +17,10 @@
    uv sync  # もしくは pip install -e .
    python -m dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
    ```
+   OpenAI 互換エンドポイントに切り替える例:
+   ```bash
+   python -m dokabun -i examples/sample.csv --model gpt-4o-mini --base-url https://api.openai.com/v1
+   ```
    or (uv を使っている場合)
    ```bash
    uv run python -m dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
@@ -28,6 +32,7 @@
    | --- | --- |
    | `-i, --input` | 入力スプレッドシート (`.xlsx` または `.csv`) |
    | `--model` | 使用するモデル名 (既定: `openai/gpt-4.1-mini`) |
+   | `--base-url` | LLM API のベース URL (既定: `https://openrouter.ai/api/v1`) |
    | `--concurrency` | 同時並列数 (既定: 5) |
    | `--partial-interval` | 何行ごとに一時保存するか |
    | `--max-text-file-bytes` | テキストファイル読み込み時の最大サイズ（バイト）(既定: 262144) |
