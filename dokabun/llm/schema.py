@@ -50,4 +50,3 @@ def _split_header(header: str) -> tuple[str, str]:
 
     column, description = header.split("|", 1)
     return column.strip(), description.strip()
-

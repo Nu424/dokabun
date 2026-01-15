@@ -1,4 +1,3 @@
-t_content,summary|本文の要約,sentiment|感情ラベル
+i_content,so_summary|本文の要約,so_sentiment|感情ラベル
 "今日はとても暑い一日でした。",,
 "新商品のレビューを集めています。",,
-

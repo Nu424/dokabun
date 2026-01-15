@@ -78,8 +78,10 @@ def _build_row_summary(row_index: int, row: pd.Series) -> str:
 
     lines = [f"行インデックス: {row_index}"]
     for column, value in row.items():
-        if isinstance(column, str) and (column.startswith("ns_") or column.startswith("nsf_")):
-            continue
+        if isinstance(column, str):
+            lower = column.lower()
+            if lower.startswith(("nso_", "nsof_", "c_", "eo")):
+                continue
         if pd.isna(value):
             value_str = ""
         else:

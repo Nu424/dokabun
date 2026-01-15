@@ -64,7 +64,7 @@ class SpreadsheetReaderWriter:
 
     @property
     def target_base_dir(self) -> Path:
-        """t_xxx 列の相対パス解決に利用するディレクトリを返す。"""
+        """i_xxx 列の相対パス解決に利用するディレクトリを返す。"""
 
         return self.input_dir
 

@@ -24,9 +24,9 @@ class AppConfig:
         max_rows: 実行あたりの最大処理行数。None なら制限なし。
         log_level: ルートロガーに適用するログレベル文字列。
         max_text_file_bytes: テキストファイル読み込み時の最大サイズ（バイト）。デフォルトは 256KiB。
-        nsf_ext: nsf 出力ファイルの拡張子（txt / md）。
-        nsf_name_template: nsf 出力の命名テンプレート。
-        nsf_name_template_filetarget: t_ が単一のファイルパスの場合の命名テンプレート。
+        nsof_ext: nsof 出力ファイルの拡張子（txt / md）。
+        nsof_name_template: nsof 出力の命名テンプレート。
+        nsof_name_template_filetarget: i_ が単一のファイルパスの場合の命名テンプレート。
     """
 
     input_path: Path
@@ -41,9 +41,9 @@ class AppConfig:
     max_rows: Optional[int] = None
     log_level: str = "INFO"
     max_text_file_bytes: int = 262_144
-    nsf_ext: str = "txt"
-    nsf_name_template: str = "nsf{nsf_index}_{row_no}.{ext}"
-    nsf_name_template_filetarget: str = "{target_file_stem}_nsf{nsf_index}.{ext}"
+    nsof_ext: str = "txt"
+    nsof_name_template: str = "nsof{nsf_index}_{row_no}.{ext}"
+    nsof_name_template_filetarget: str = "{target_file_stem}_nsof{nsf_index}.{ext}"
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -67,9 +67,9 @@ class AppConfig:
         if self.max_text_file_bytes <= 0:
             raise ValueError("max_text_file_bytes は 1 以上である必要があります。")
 
-        self.nsf_ext = self.nsf_ext.lstrip(".").lower()
-        if self.nsf_ext not in {"txt", "md"}:
-            raise ValueError("nsf_ext は txt または md を指定してください。")
+        self.nsof_ext = self.nsof_ext.lstrip(".").lower()
+        if self.nsof_ext not in {"txt", "md"}:
+            raise ValueError("nsof_ext は txt または md を指定してください。")
 
         self.base_url = self.base_url.rstrip("/") or "https://openrouter.ai/api/v1"
 
@@ -95,9 +95,9 @@ class AppConfig:
             max_rows=self.max_rows,
             log_level=self.log_level,
             max_text_file_bytes=self.max_text_file_bytes,
-            nsf_ext=self.nsf_ext,
-            nsf_name_template=self.nsf_name_template,
-            nsf_name_template_filetarget=self.nsf_name_template_filetarget,
+            nsof_ext=self.nsof_ext,
+            nsof_name_template=self.nsof_name_template,
+            nsof_name_template_filetarget=self.nsof_name_template_filetarget,
             extra=self.extra.copy(),
         )
 
@@ -125,9 +125,9 @@ class AppConfig:
             "max_rows",
             "log_level",
             "max_text_file_bytes",
-            "nsf_ext",
-            "nsf_name_template",
-            "nsf_name_template_filetarget",
+            "nsof_ext",
+            "nsof_name_template",
+            "nsof_name_template_filetarget",
         }
         filtered = {key: value for key, value in data.items() if key in known_fields}
         extra = {key: value for key, value in data.items() if key not in known_fields}
