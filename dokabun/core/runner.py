@@ -53,12 +53,35 @@ class RowWorkItem:
     Attributes:
         row_index: DataFrame 上の行インデックス。
         pending_structured_columns: まだ値が入っていない構造化出力列。
-        pending_ns_columns: まだ値が入っていない非構造化出力列。
+        pending_ns_columns: まだ値が入っていない非構造化出力列（nso_/nsof_）。
     """
 
     row_index: int
     pending_structured_columns: list[str]
     pending_ns_columns: list[str]
+
+
+@dataclass(slots=True)
+class ColumnClassification:
+    """列プレフィックス分類結果を保持するデータクラス。
+    
+    Attributes:
+        input_columns: `i_` で始まる入力列。
+        structured_columns: `so_` で始まる構造化出力列。
+        nonstructured_columns: `nso_` で始まる非構造化出力列。
+        nsof_index_map: `nsof_` 列に対する 1 始まりのインデックス。
+        label_columns: `l_` で始まるラベル列。
+        embedding_columns: `eo` で始まる埋め込み列。
+        embedding_spec_map: 埋め込み列の仕様。
+    """
+
+    input_columns: list[str]
+    structured_columns: list[str]
+    nonstructured_columns: list[str]
+    nsof_index_map: dict[str, int]
+    label_columns: list[str]
+    embedding_columns: list[str]
+    embedding_spec_map: dict[str, dict[str, Any]]
 
 
 async def process_row_async(
@@ -69,7 +92,7 @@ async def process_row_async(
     base_dir: Path,
     client: AsyncOpenRouterClient,
     config: AppConfig,
-    nsf_index_map: dict[str, int],
+    nsof_index_map: dict[str, int],
     preprocessors: Sequence[Preprocess] | None = None,
 ) -> RowResult:
     """1 行分のスプレッドシートを非同期で処理する。
@@ -77,11 +100,11 @@ async def process_row_async(
     Args:
         work_item: 行インデックスと未入力列の情報。
         df: スプレッドシート全体の DataFrame。
-        target_columns: `t_` で始まるターゲット列の順序付きリスト。
+        target_columns: `i_` で始まるターゲット列の順序付きリスト。
         base_dir: 画像パスなどを解決する基準ディレクトリ。
         client: OpenRouter へ問い合わせる非同期クライアント。
         config: 温度や最大トークン数などを含むアプリ設定。
-        nsf_index_map: nsf 列に対する 1 始まりのインデックス。
+        nsof_index_map: nsof 列に対する 1 始まりのインデックス。
 
     Returns:
         RowResult: 更新内容・usage・エラー情報を含む結果。
@@ -101,9 +124,14 @@ async def process_row_async(
 
         # ---構造化出力（JSON Schema）が必要な場合のみ実行する
         if work_item.pending_structured_columns:
+            _validate_structured_property_names(work_item.pending_structured_columns)
+            structured_headers = [
+                _structured_schema_header(col)
+                for col in work_item.pending_structured_columns
+            ]
             # ---出力形式を、ヘッダーから生成する
             schema_payload = build_schema_from_headers(
-                work_item.pending_structured_columns,
+                structured_headers,
                 name=f"dokabun_row_{work_item.row_index}",
             )
             # ---プロンプトを生成する
@@ -122,15 +150,19 @@ async def process_row_async(
             )
             # ---レスポンスをパースする
             parsed = _extract_parsed_json(response)
-            usage = _strip_cost_keys(_coerce_usage_dict(getattr(response, "usage", None)))
+            usage = _strip_cost_keys(
+                _coerce_usage_dict(getattr(response, "usage", None))
+            )
             generation_id = getattr(response, "id", None)
             if generation_id:
                 generation_ids.append(str(generation_id))
             # ---更新内容をビルドする
-            updates.update(_build_updates_from_parsed(parsed, work_item.pending_structured_columns))
+            updates.update(
+                _build_updates_from_parsed(parsed, work_item.pending_structured_columns)
+            )
             usage_total = _merge_usage(usage_total, usage)
 
-        # ---非構造化出力（ns_/nsf_）を列ごとに実行する
+        # ---非構造化出力（nso_/nsof_）を列ごとに実行する
         if work_item.pending_ns_columns:
             row_no_1based = work_item.row_index + 1
             target_file_stem = _guess_target_file_stem(row, target_columns, base_dir)
@@ -154,18 +186,18 @@ async def process_row_async(
                     # ---出力結果を取得する
                     content_text = _extract_text_content(ns_response)
 
-                    # ---nsf_列の場合、出力結果をファイルに保存する
-                    if ns_column.startswith("nsf_"):
+                    # ---nsof_列の場合、出力結果をファイルに保存する
+                    if ns_column.lower().startswith("nsof_"):
                         # ---ファイル名を準備する
-                        nsf_index = nsf_index_map.get(ns_column, 1)
-                        filename = _build_nsf_filename(
+                        nsf_index = nsof_index_map.get(ns_column, 1)
+                        filename = _build_nsof_filename(
                             nsf_index=nsf_index,
                             row_no=row_no_1based,
-                            ext=config.nsf_ext,
+                            ext=config.nsof_ext,
                             target_file_stem=target_file_stem,
                             use_filetarget_template=target_file_stem is not None,
-                            name_template=config.nsf_name_template,
-                            name_template_filetarget=config.nsf_name_template_filetarget,
+                            name_template=config.nsof_name_template,
+                            name_template_filetarget=config.nsof_name_template_filetarget,
                         )
                         # ---ファイルに保存する
                         output_path = (config.output_dir / filename).resolve()
@@ -221,14 +253,17 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     reader = SpreadsheetReaderWriter(config)
     meta = reader.load_meta_if_exists() or {}
     last_completed_row = meta.get("last_completed_row")
-    start_row_index = int(last_completed_row) + 1 if last_completed_row is not None else 0
+    start_row_index = (
+        int(last_completed_row) + 1 if last_completed_row is not None else 0
+    )
 
     # ---generation_id 永続化用のパスを用意する
     generation_log_path = (
         reader.output_dir / f"{reader.base_stem}_{reader.timestamp}.generations.jsonl"
     )
     cost_cache_path = (
-        reader.output_dir / f"{reader.base_stem}_{reader.timestamp}.generation_costs.jsonl"
+        reader.output_dir
+        / f"{reader.base_stem}_{reader.timestamp}.generation_costs.jsonl"
     )
     generation_log_path.parent.mkdir(parents=True, exist_ok=True)
     generation_log_path.touch(exist_ok=True)
@@ -236,12 +271,11 @@ async def run_async(config: AppConfig, api_key: str) -> None:
 
     # ---処理対象・出力列をわけ、処理が必要な部分を抽出する
     df = reader.load()
-    (
-        target_columns,
-        structured_columns,
-        ns_columns,
-        nsf_index_map,
-    ) = _classify_columns(df)
+    classification = _classify_columns(df)
+    target_columns = classification.input_columns
+    structured_columns = classification.structured_columns
+    ns_columns = classification.nonstructured_columns
+    nsof_index_map = classification.nsof_index_map
     work_items = _collect_work_items(
         df,
         structured_columns=structured_columns,
@@ -259,7 +293,9 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     semaphore = asyncio.Semaphore(config.max_concurrency)
     summary = ExecutionSummary()
     summary.start(total_rows=len(work_items))
-    preprocessors = build_default_preprocessors(max_text_file_bytes=config.max_text_file_bytes)
+    preprocessors = build_default_preprocessors(
+        max_text_file_bytes=config.max_text_file_bytes
+    )
 
     # 処理対象が無い場合でも generation のコストだけ再計算する
     if not work_items:
@@ -286,7 +322,7 @@ async def run_async(config: AppConfig, api_key: str) -> None:
                 base_dir=reader.target_base_dir,
                 client=client,
                 config=config,
-                nsf_index_map=nsf_index_map,
+                nsof_index_map=nsof_index_map,
                 preprocessors=preprocessors,
             )
 
@@ -312,7 +348,9 @@ async def run_async(config: AppConfig, api_key: str) -> None:
             df.loc[result.row_index, column] = value
 
         if result.error:
-            logger.error("行 %s の処理に失敗しました: %s", result.row_index, result.error)
+            logger.error(
+                "行 %s の処理に失敗しました: %s", result.row_index, result.error
+            )
             summary.record_failure(
                 result.row_index,
                 result.error_type or "RowError",
@@ -322,7 +360,9 @@ async def run_async(config: AppConfig, api_key: str) -> None:
             summary.record_success(result.row_index, result.usage)
 
         if result.generation_ids:
-            _append_jsonl(generation_log_path, [{"id": gid} for gid in result.generation_ids])
+            _append_jsonl(
+                generation_log_path, [{"id": gid} for gid in result.generation_ids]
+            )
             new_generation_ids_run.extend(result.generation_ids)
 
         # ---部分的な保存のため、処理範囲を更新する
@@ -388,52 +428,133 @@ def run(config: AppConfig, api_key: str) -> None:
         raise
 
 
-def _classify_columns(
-    df: pd.DataFrame,
-) -> tuple[list[str], list[str], list[str], dict[str, int]]:
-    """DataFrame の列をターゲット列・構造化出力列・非構造化列に分類する。
-
-    Args:
-        df: スプレッドシートから読み込んだ DataFrame。
+def _classify_columns(df: pd.DataFrame) -> ColumnClassification:
+    """DataFrame の列を新プレフィックス体系で分類し、妥当性を検証する。
 
     Returns:
-        tuple[list[str], list[str], list[str], dict[str, int]]:
-            (ターゲット列, 構造化出力列, 非構造化列, nsf列のインデックスマップ)
-    Notes:
-        nsf列のインデックスマップは、以下のような形式である
-        ```
-        {
-            "{nsfな列名}": {その列のインデックス(1始まり)},
-            "nsf_2": 2,
-            "nsf_3": 3,
-            ...
-        }
-        ```
+        ColumnClassification: 列分類の結果。
     """
 
-    target_columns: list[str] = []
+    input_columns: list[str] = []
     structured_columns: list[str] = []
     ns_columns: list[str] = []
-    nsf_index_map: dict[str, int] = {}
-    nsf_counter = 0
+    nsof_index_map: dict[str, int] = {}
+    nsof_counter = 0
+    label_columns: list[str] = []
+    embedding_columns: list[str] = []
+    embedding_spec_map: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
 
     for col in df.columns:
         if not isinstance(col, str):
+            errors.append("列名が文字列ではありません。")
             continue
-        if col.startswith("t_"):
-            target_columns.append(col)
-            continue
-        if col.startswith("nsf_"):
-            ns_columns.append(col)
-            nsf_counter += 1
-            nsf_index_map[col] = nsf_counter
-            continue
-        if col.startswith("ns_"):
-            ns_columns.append(col)
-            continue
-        structured_columns.append(col)
 
-    return target_columns, structured_columns, ns_columns, nsf_index_map
+        lower = col.lower()
+
+        if lower.startswith("i_"):
+            input_columns.append(col)
+            continue
+
+        if lower.startswith("l_"):
+            label_columns.append(col)
+            continue
+
+        if lower.startswith("so_"):
+            structured_columns.append(col)
+            continue
+
+        if lower.startswith("nsof_"):
+            ns_columns.append(col)
+            nsof_counter += 1
+            nsof_index_map[col] = nsof_counter
+            continue
+
+        if lower.startswith("nso_"):
+            ns_columns.append(col)
+            continue
+
+        if lower.startswith("eo"):
+            try:
+                embedding_spec_map[col] = _parse_embedding_column(col)
+                embedding_columns.append(col)
+            except ValueError as exc:  # noqa: BLE001
+                errors.append(str(exc))
+            continue
+
+        errors.append(
+            f"未知の列プレフィックスです: {col}（ラベル列にする場合は l_ を付与してください）"
+        )
+
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    if not input_columns:
+        raise ValueError(
+            "入力列 i_ が1つも存在しません。少なくとも1列の i_ を用意してください。"
+        )
+
+    return ColumnClassification(
+        input_columns=input_columns,
+        structured_columns=structured_columns,
+        nonstructured_columns=ns_columns,
+        nsof_index_map=nsof_index_map,
+        label_columns=label_columns,
+        embedding_columns=embedding_columns,
+        embedding_spec_map=embedding_spec_map,
+    )
+
+
+def _strip_prefix_case_insensitive(text: str, prefix: str) -> str:
+    """大小文字を無視して prefix を取り除く。"""
+
+    if text.lower().startswith(prefix.lower()):
+        return text[len(prefix) :]
+    return text
+
+
+def _structured_schema_header(column: str) -> str:
+    """so_ を除去し、説明を保持したまま Schema 用ヘッダに変換する。"""
+
+    if "|" in column:
+        name, desc = column.split("|", 1)
+        stripped_name = _strip_prefix_case_insensitive(name, "so_")
+        return f"{stripped_name}|{desc}"
+    return _strip_prefix_case_insensitive(column, "so_")
+
+
+def _validate_structured_property_names(columns: Iterable[str]) -> None:
+    """構造化列のプロパティ名衝突を検知する。"""
+
+    seen: set[str] = set()
+    for col in columns:
+        prop = _column_to_property_name(col).lower()
+        if prop in seen:
+            raise ValueError(f"構造化出力のプロパティ名が重複しています: {prop}")
+        seen.add(prop)
+
+
+def _parse_embedding_column(column: str) -> dict[str, Any]:
+    """eo* 列名をパースし、method/dim/file_output を返す。未対応形式ならエラー。"""
+
+    pattern = re.compile(
+        r"^eo(?:(?P<method>[nptu])(?P<dim>\d+))?(?P<fileflag>f)?$", re.IGNORECASE
+    )
+    match = pattern.match(column)
+    if not match:
+        raise ValueError(
+            f"埋め込み列の形式が不正です: {column} (例: eo / eof / eon1536 / eon1536f)"
+        )
+
+    method = match.group("method")
+    dim = match.group("dim")
+    file_output = match.group("fileflag") is not None
+
+    return {
+        "method": method.lower() if method else None,
+        "dim": int(dim) if dim else None,
+        "file_output": file_output,
+    }
 
 
 def _collect_work_items(
@@ -538,7 +659,9 @@ def _build_targets(
         if _is_empty_value(value):
             continue
         try:
-            target = run_preprocess_pipeline(str(value), base_dir, preprocessors=preprocessors)
+            target = run_preprocess_pipeline(
+                str(value), base_dir, preprocessors=preprocessors
+            )
             targets.append(target)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ターゲット列 %s の前処理に失敗しました: %s", column, exc)
@@ -576,15 +699,17 @@ def _column_to_property_name(column: str) -> str:
     """列ヘッダから JSON プロパティ名を抽出する。
 
     Args:
-        column: ``列名`` または ``列名|説明`` 形式のヘッダ文字列。
+        column: ``列名`` または ``列名|説明`` 形式のヘッダ文字列（so_ プレフィックスを含む）。
 
     Returns:
         str: JSON Schema で利用するプロパティ名。
     """
 
-    if "|" not in column:
-        return column.strip()
-    name, _ = column.split("|", 1)
+    if "|" in column:
+        name, _ = column.split("|", 1)
+    else:
+        name = column
+    name = _strip_prefix_case_insensitive(name, "so_")
     return name.strip()
 
 
@@ -669,13 +794,14 @@ def _strip_cost_keys(usage: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _parse_ns_prompt(column: str) -> str:
-    """ns_/nsf_ 列ヘッダーからプロンプト文を抽出する。"""
+    """nso_/nsof_ 列ヘッダーからプロンプト文を抽出する。"""
 
     stripped = column
-    if stripped.startswith("nsf_"):
-        stripped = stripped[len("nsf_") :]
-    elif stripped.startswith("ns_"):
-        stripped = stripped[len("ns_") :]
+    lower = stripped.lower()
+    if lower.startswith("nsof_"):
+        stripped = stripped[len("nsof_") :]
+    elif lower.startswith("nso_"):
+        stripped = stripped[len("nso_") :]
     if "|" in stripped:
         stripped, _ = stripped.split("|", 1)
     prompt = stripped.strip()
@@ -734,7 +860,7 @@ def _merge_usage(
 def _guess_target_file_stem(
     row: pd.Series, target_columns: Sequence[str], base_dir: Path
 ) -> str | None:
-    """t_ 列が 1 つだけで、ファイルパスなら stem を返す。nsfの出力ファイル名の判定に用いる"""
+    """i_ 列が 1 つだけで、ファイルパスなら stem を返す。nsof の出力ファイル名の判定に用いる"""
 
     if len(target_columns) != 1:
         return None
@@ -749,7 +875,7 @@ def _guess_target_file_stem(
     return None
 
 
-def _build_nsf_filename(
+def _build_nsof_filename(
     *,
     nsf_index: int,
     row_no: int,
@@ -759,16 +885,16 @@ def _build_nsf_filename(
     name_template: str,
     name_template_filetarget: str,
 ) -> str:
-    """nsf 用のファイル名を生成する。
-    
+    """nsof 用のファイル名を生成する。
+
     Args:
         nsf_index: nsf_index
         row_no: 行番号
         ext: 拡張子
-        target_file_stem: t_列のファイル名のstem
-        use_filetarget_template: filenameに、t_列のファイル名のstemを使用するかどうか({ファイル名}_nsf{nsf_index}.{ext}にするか？)
+        target_file_stem: i_列のファイル名のstem
+        use_filetarget_template: filenameに、i_列のファイル名のstemを使用するかどうか({ファイル名}_nsf{nsf_index}.{ext}にするか？)
         name_template: ファイル名のテンプレート
-        name_template_filetarget: t_列のファイル名のstemを使用する場合のファイル名のテンプレート
+        name_template_filetarget: i_列のファイル名のstemを使用する場合のファイル名のテンプレート
     """
 
     clean_ext = ext.lstrip(".")
@@ -861,7 +987,9 @@ async def _reconcile_generation_costs(
     # ---cost_cache_pathのjsonlを読み込み、キャッシュからgeneration_idとcostを取得する
     cost_records = _read_jsonl(cost_cache_path)
     cache: dict[str, dict[str, Any]] = {
-        rec["id"]: rec for rec in cost_records if isinstance(rec, dict) and rec.get("id")
+        rec["id"]: rec
+        for rec in cost_records
+        if isinstance(rec, dict) and rec.get("id")
     }
 
     # ---キャッシュにないgeneration_idをpending_idsに追加する
@@ -873,19 +1001,25 @@ async def _reconcile_generation_costs(
 
     # ---すべてコスト取得済みの場合、最終的なコストを計算・返却する
     if not pending_ids:
-        total_cost = sum(float(cache[gid].get("total_cost", 0.0) or 0.0) for gid in cache)
+        total_cost = sum(
+            float(cache[gid].get("total_cost", 0.0) or 0.0) for gid in cache
+        )
         run_cost = sum(
             float(cache.get(gid, {}).get("total_cost", 0.0) or 0.0)
             for gid in _unique_preserve(run_generation_ids)
             if cache.get(gid, {}).get("status") == "ok"
         )
         pending_count = len(
-            [gid for gid in generation_ids_all if cache.get(gid, {}).get("status") != "ok"]
+            [
+                gid
+                for gid in generation_ids_all
+                if cache.get(gid, {}).get("status") != "ok"
+            ]
         )
         return run_cost, total_cost, pending_count
 
     # ---コスト取得を並列実行する
-    semaphore = asyncio.Semaphore(max_concurrency) # セマフォで並列数を制限する
+    semaphore = asyncio.Semaphore(max_concurrency)  # セマフォで並列数を制限する
 
     async def _fetch(gen_id: str) -> tuple[str, float | None]:
         async with semaphore:
@@ -913,14 +1047,16 @@ async def _reconcile_generation_costs(
         rec = cache.get(gen_id, {"id": gen_id, "status": "pending", "total_cost": None})
         ordered_records.append(rec)
     cost_cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cost_cache_path.open("w", encoding="utf-8") as f: # キャッシュを更新する
+    with cost_cache_path.open("w", encoding="utf-8") as f:  # キャッシュを更新する
         for rec in ordered_records:
             f.write(json.dumps(rec, ensure_ascii=False))
             f.write("\n")
 
     # ---最終的なコストを計算・返却する
     total_cost = sum(
-        float(rec.get("total_cost", 0.0) or 0.0) for rec in ordered_records if rec.get("status") == "ok"
+        float(rec.get("total_cost", 0.0) or 0.0)
+        for rec in ordered_records
+        if rec.get("status") == "ok"
     )
     run_cost = sum(
         float(cache.get(gid, {}).get("total_cost", 0.0) or 0.0)

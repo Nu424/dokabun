@@ -1,7 +1,7 @@
 # dokabun
 
-スプレッドシートをインターフェースとして LLM の構造化出力を活用する CLI ツールです。  
-`t_` で始まる列を分析対象として読み込み、空欄になっている出力列を OpenRouter 経由で自動的に埋めます。
+スプレッドシートをインターフェースとして LLM の構造化/非構造化出力を活用する CLI ツールです。  
+`i_` で始まる列を分析対象として読み込み、空欄になっている出力列を OpenRouter 経由で自動的に埋めます。
 
 ## 使い方
 
@@ -37,9 +37,9 @@
    | `--partial-interval` | 何行ごとに一時保存するか |
    | `--max-text-file-bytes` | テキストファイル読み込み時の最大サイズ（バイト）(既定: 262144) |
    | `--timestamp` | 途中再開したいタイムスタンプを明示指定 |
-   | `--nsf-ext` | `nsf_` 列の出力拡張子 (`txt` / `md`) |
-   | `--nsf-name-template` | `nsf_` 通常時のファイル名テンプレ |
-   | `--nsf-name-template-filetarget` | `t_` が1列かつファイルパス時のファイル名テンプレ |
+| `--nsof-ext` | `nsof_` 列の出力拡張子 (`txt` / `md`) |
+| `--nsof-name-template` | `nsof_` 通常時のファイル名テンプレ |
+| `--nsof-name-template-filetarget` | `i_` が1列かつファイルパス時のファイル名テンプレ |
 
 3. 実行すると、`output_dir`（未指定時は入力ファイルと同じディレクトリ）に下記ファイルが出力されます。
 
@@ -75,7 +75,9 @@
         - `df = reader.load()`
           - `{stem}_{timestamp}.partial.*.xlsx` があれば最新を優先して読み込み
           - 無ければ入力を `{stem}_{timestamp}{ext}` にコピーして読み込み（`.xlsx` / `.csv`）
-        - `_classify_columns(df)` で列を分類（`t_` / 構造化出力 / `ns_`・`nsf_`）
+        - `_classify_columns(df)` で列を分類（`i_` / `so_` / `nso_`・`nsof_` / `l_` / `eo*`）
+          - `ColumnClassification` にまとめて返却
+          - 大小文字どちらでも可
         - `_collect_work_items(...)` で「未入力セルが残る行」だけを `RowWorkItem` として列挙
         - `AsyncOpenRouterClient(...)` と `asyncio.Semaphore(max_concurrency)` を用意
         - 各行をタスク化し、`asyncio.as_completed(...)` で完了順に回収
@@ -89,14 +91,14 @@
 - **ターゲット列の前処理**: `_build_targets(...)` → `run_preprocess_pipeline(...)`
   - `ImagePreprocess` / `TextFilePreprocess` / `PlainTextPreprocess` の順で判定し、`Target`（`TextTarget`/`ImageTarget`）へ変換
   - ファイルパスは `SpreadsheetReaderWriter.target_base_dir`（= 入力スプレッドシートのディレクトリ）からの相対として解決
-- **構造化出力（通常の出力列）**
-  - `build_schema_from_headers(pending_columns, name=...)` で LLM に渡す JSON Schema を生成
-    - `列名|説明` の場合も **`列名` 部分**をプロパティ名として列へマッピング
+- **構造化出力（`so_` 列）**
+  - `so_{name}|説明` から `name|説明` を組み立てて `build_schema_from_headers(...)` で JSON Schema を生成
+    - `so_` を除去した **`name` 部分**をプロパティ名として列へマッピング
   - `build_prompt(...)` → `client.create_completion(...)`（OpenRouter 経由で構造化出力を要求）
   - 応答は `_extract_parsed_json(...)` で JSON 化し、対応する出力列に値を書き戻す
-- **非構造化出力（`ns_` / `nsf_`）**
+- **非構造化出力（`nso_` / `nsof_`）**
   - `_parse_ns_prompt(column)` で列名からプロンプト文を抽出 → `build_nonstructured_prompt(...)` → `client.create_completion_text(...)`
-  - `nsf_` は `output_dir` にファイル保存し、セルには相対ファイル名を書き込み（命名は `--nsf-name-template*` で制御）
+  - `nsof_` は `output_dir` にファイル保存し、セルには相対ファイル名を書き込み（命名は `--nsof-name-template*` で制御）
 
 ### 途中再開の考え方（`timestamp`）
 
@@ -106,27 +108,32 @@
 
 ## スプレッドシート形式
 
-- 列名が `t_` で始まる列を **分析対象列** として扱います。複数ある場合は左から順にプロンプトへ渡されます。
+- **入力列**: `i_` で始まる列を分析対象として扱います（大小文字不問）。複数ある場合は左から順にプロンプトへ渡されます。
   - セルの値がテキストファイルパス（`.txt`, `.md`, `.markdown`, `.log`, `.csv`, `.json`, `.yml`, `.yaml`）の場合、そのファイルを読み込んで内容を LLM に渡します。
   - セルの値が画像ファイルパス（`.png`, `.jpg`, `.jpeg`, `.webp`）の場合、その画像を LLM に渡します。
   - それ以外はプレーンテキストとして扱います。
   - ファイルパスはスプレッドシートファイルからの相対パスとして解釈されます。
-- それ以外の列は **出力列** で、ヘッダを `列名` または `列名|説明` と記述します。
-  - `説明` は JSON Schema の `description` に利用されます。
+- **ラベル列**: `l_` で始まる列は処理に影響しません。後段の解析用メタデータとして利用できます。
+- **構造化出力列**: `so_{列名}[|説明]`
+  - JSON Schema のプロパティ名は `so_` を除去した `{列名}` を使用します。
 - LLM は空欄の出力列のみを埋めます。既に値が入っているセルは上書きしません。
 
 ### 非構造化出力列 (`ns_`, `nsf_`)
 
-- `ns_{プロンプト}`: 列ごとに非構造化（プレーンテキスト）出力を生成し、セルへ書き込みます。まとめずに列単位で呼び出します。
-- `nsf_{プロンプト}`: 生成結果をファイルへ保存し、セルにはファイル名（`output_dir` 相対）を書き込みます。
+- `nso_{プロンプト}`: 列ごとに非構造化（プレーンテキスト）出力を生成し、セルへ書き込みます。まとめずに列単位で呼び出します。
+- `nsof_{プロンプト}`: 生成結果をファイルへ保存し、セルにはファイル名（`output_dir` 相対）を書き込みます。
   - デフォルト名: `nsf{index}_{行番号}.txt`（行番号はデータ行 1 始まり）
-    - 例: `nsf1_1.txt`, `nsf1_2.txt`, `nsf1_3.txt`, ...
+    - 例: `nsof1_1.txt`, `nsof1_2.txt`, `nsof1_3.txt`, ...
   - `t_` 列が 1 つで、セルが実在ファイルパスなら `{target_file_stem}_nsf{index}.txt` を採用
-    - 例: `text01.txt` -> `text01_nsf1.txt`
+    - 例: `text01.txt` -> `text01_nsof1.txt`
+
+### 埋め込み出力列 (`eo_`, `eof_`, `eo{method}{dim}_`, `eo{method}{dim}f_`)
+
+- 埋め込み(Embedding)を作成します。現状は未実装です。
 
 `examples/sample.csv` には最小構成のサンプルが含まれています。
 
-| t_content | summary\|本文の要約 | sentiment\|感情ラベル |
+| i_content | so_summary\|本文の要約 | so_sentiment\|感情ラベル |
 | --- | --- | --- |
 | 今日はとても暑い一日でした。 | (空欄) | (空欄) |
 | 新商品のレビューを集めています。 | (空欄) | (空欄) |
