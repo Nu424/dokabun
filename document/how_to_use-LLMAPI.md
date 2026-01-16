@@ -63,39 +63,67 @@ const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
 }
 ```
 
-- 実際のコストを確認したい場合は、`body.usage.include` を **true** にします。  
-  サンプルコードは次のとおりです。
+- 実際のコストを確認したい場合は、`/generation` エンドポイントを使用します。
+- リクエスト例:
 
 ```typescript
-const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-  method: 'POST',
+const response = await fetch('https://openrouter.ai/api/v1/generation', {
+  method: 'GET',
   headers: {
-    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-    'Content-Type': 'application/json',
+    Authorization: `Bearer <OPENROUTER_API_KEY>`,
   },
-  body: JSON.stringify({
-    model: '<モデル名>',
-    messages: [...],
-    usage: {
-        include: true,
-    },
-  }),
+  params: {
+    id: '<生成リクエストのID>',
+  },
 });
 ```
 
-- コスト付きレスポンス例:
-
+- レスポンス例:
 ```json
 {
-  "id": "<ID>",
-  ...,
-  "usage": {
-      "prompt_tokens": <入力トークン数>,
-      "completion_tokens": <出力トークン数>,
-      "total_tokens": <合計トークン数>,
-      "cost": <呼び出しにかかるコスト(USD)>
+  "data": {
+    "id": "gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG", // 生成リクエストのID
+    "upstream_id": "chatcmpl-791bcf62-080e-4568-87d0-94c72e3b4946",
+    "total_cost": 0.0015, // 合計コスト(USD)
+    "cache_discount": 0.0002,
+    "upstream_inference_cost": 0.0012,
+    "created_at": "2024-07-15T23:33:19.433273+00:00",
+    "model": "sao10k/l3-stheno-8b",
+    "app_id": 12345,
+    "streamed": true,
+    "cancelled": false,
+    "provider_name": "Infermatic",
+    "latency": 1250,
+    "moderation_latency": 50,
+    "generation_time": 1200,
+    "finish_reason": "stop",
+    "tokens_prompt": 10,
+    "tokens_completion": 25,
+    "native_tokens_prompt": 10,
+    "native_tokens_completion": 25,
+    "native_tokens_completion_images": 0,
+    "native_tokens_reasoning": 5,
+    "native_tokens_cached": 3,
+    "num_media_prompt": 1,
+    "num_input_audio_prompt": 0,
+    "num_media_completion": 0,
+    "num_search_results": 5,
+    "origin": "https://openrouter.ai/",
+    "usage": 0.0015,
+    "is_byok": false,
+    "native_finish_reason": "stop",
+    "external_user": "user-123",
+    "api_type": "completions",
+    "router": "openrouter/auto"
   }
 }
+```
+
+- コストは `total_cost` キーで取得できます。
+
+```typescript
+const cost = responseJson.total_cost;
+console.log(cost);
 ```
 
 ## モデルの選び方
@@ -448,3 +476,57 @@ const response02 = await fetch('https://openrouter.ai/api/v1/chat/completions', 
   }),
 });
 ```
+
+## 埋め込み
+- テキストの埋め込みは、`embeddings` エンドポイントを使用します。
+- リクエスト例:
+
+```typescript
+const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer <OPENROUTER_API_KEY>`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model: 'openai/text-embedding-3-small',
+    input: 'こんにちは、世界！',
+    dimensions: 1536, // オプショナル。指示がなければ未指定で良い
+  }),
+});
+
+const responseJson = await response.json();
+const embedding = responseJson.data[0].embedding; // float[]の配列
+console.log(embedding);
+```
+
+- レスポンスの形式:
+```json
+{
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [float, float, ...],
+      "index": 0,
+    }
+  ],
+  "model": "openai/text-embedding-3-small",
+  "usage": {
+    "prompt_tokens": 0,
+    "total_tokens": 0,
+    "cost": 0.0001
+  }
+}
+```
+
+- 使用可能なモデル例:
+  - `openai/text-embedding-3-small`
+    - 8192コンテキスト, 1536次元(次元指定可能), $0.02 / 入力 1M トークン, $0 / 出力 1M トークン
+  - `openai/text-embedding-3-large`
+    - 8192コンテキスト, 1536次元(次元指定可能), $0.13 / 入力 1M トークン, $0 / 出力 1M トークン
+  - `google/gemini-embedding-001`
+    - 2000コンテキスト, 3072次元(次元指定可能), $0.15 / 入力 1M トークン, $0 / 出力 1M トークン
+  - `qwen/qwen3-embedding-8b`
+    - 32768コンテキスト, 4096次元(次元指定可能), $0.01 / 入力 1M トークン, $0 / 出力 1M トークン
+  - `sentence-transformers/all-minilm-l6-v2`
+    - 512コンテキスト, 384次元(次元指定可能), $0.005 / 入力 1M トークン, $0 / 出力 1M トークン
