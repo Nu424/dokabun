@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import pandas as pd
+import numpy as np
 from tqdm.auto import tqdm
 
 from dokabun.config import AppConfig
@@ -21,9 +22,12 @@ from dokabun.llm.schema import build_schema_from_headers
 from dokabun.logging_utils import get_logger
 from dokabun.preprocess import build_default_preprocessors, run_preprocess_pipeline
 from dokabun.preprocess.base import Preprocess
-from dokabun.target import Target
+from dokabun.target import Target, TextTarget
 
 logger = get_logger(__name__)
+
+EMBEDDING_CELL_CHAR_LIMIT = 32767 # 埋め込みベクトルをセルに出力する場合の文字数制限
+EMBEDDING_FILE_EXT = "npy" # 埋め込みベクトルをファイルに出力する場合のファイル拡張子
 
 
 @dataclass(slots=True)
@@ -36,6 +40,7 @@ class RowResult:
         usage: LLM 応答から得た usage 情報（トークン数やコストなど）。
         error: エラー発生時のメッセージ。成功時は ``None``。
         error_type: エラー種別（例外名など）。成功時は ``None``。
+        embedding_vectors: 後段処理が必要な埋め込みベクトル。
     """
 
     row_index: int
@@ -44,6 +49,7 @@ class RowResult:
     error: str | None = None
     error_type: str | None = None
     generation_ids: list[str] = field(default_factory=list)
+    embedding_vectors: dict[str, list[float]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -54,11 +60,13 @@ class RowWorkItem:
         row_index: DataFrame 上の行インデックス。
         pending_structured_columns: まだ値が入っていない構造化出力列。
         pending_ns_columns: まだ値が入っていない非構造化出力列（nso_/nsof_）。
+        pending_embedding_columns: まだ値が入っていない埋め込み列（eo*）。
     """
 
     row_index: int
     pending_structured_columns: list[str]
     pending_ns_columns: list[str]
+    pending_embedding_columns: list[str]
 
 
 @dataclass(slots=True)
@@ -73,6 +81,17 @@ class ColumnClassification:
         label_columns: `l_` で始まるラベル列。
         embedding_columns: `eo` で始まる埋め込み列。
         embedding_spec_map: 埋め込み列の仕様。
+        e.g.
+            {
+                "eo_1536": {
+                    "pre_method": "n",
+                    "pre_dim": 1536,
+                    "post_method": "n",
+                    "post_dim": 1536,
+                    "file_output": True,
+                }
+            }
+        embedding_index_map: 埋め込み列に対する 1 始まりのインデックス。
     """
 
     input_columns: list[str]
@@ -82,6 +101,7 @@ class ColumnClassification:
     label_columns: list[str]
     embedding_columns: list[str]
     embedding_spec_map: dict[str, dict[str, Any]]
+    embedding_index_map: dict[str, int]
 
 
 async def process_row_async(
@@ -93,6 +113,8 @@ async def process_row_async(
     client: AsyncOpenRouterClient,
     config: AppConfig,
     nsof_index_map: dict[str, int],
+    embedding_spec_map: dict[str, dict[str, Any]],
+    embedding_index_map: dict[str, int],
     preprocessors: Sequence[Preprocess] | None = None,
 ) -> RowResult:
     """1 行分のスプレッドシートを非同期で処理する。
@@ -105,6 +127,8 @@ async def process_row_async(
         client: OpenRouter へ問い合わせる非同期クライアント。
         config: 温度や最大トークン数などを含むアプリ設定。
         nsof_index_map: nsof 列に対する 1 始まりのインデックス。
+        embedding_spec_map: 埋め込み列の仕様。
+        embedding_index_map: 埋め込み列に対する 1 始まりのインデックス。
 
     Returns:
         RowResult: 更新内容・usage・エラー情報を含む結果。
@@ -121,6 +145,8 @@ async def process_row_async(
         usage_total: dict[str, Any] | None = None
         errors: list[str] = []
         generation_ids: list[str] = []
+        embedding_vectors: dict[str, list[float]] = {} # 後処理用の埋め込みベクトル
+        row_no_1based = work_item.row_index + 1
 
         # ---構造化出力（JSON Schema）が必要な場合のみ実行する
         if work_item.pending_structured_columns:
@@ -164,7 +190,6 @@ async def process_row_async(
 
         # ---非構造化出力（nso_/nsof_）を列ごとに実行する
         if work_item.pending_ns_columns:
-            row_no_1based = work_item.row_index + 1
             target_file_stem = _guess_target_file_stem(row, target_columns, base_dir)
             for ns_column in work_item.pending_ns_columns:
                 try:
@@ -211,6 +236,50 @@ async def process_row_async(
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"{ns_column}: {exc}")
 
+        # ---埋め込み（eo*）を列ごとに実行する
+        if work_item.pending_embedding_columns:
+            try:
+                embedding_text = _build_embedding_text(targets)
+            except Exception as exc:
+                for column in work_item.pending_embedding_columns:
+                    errors.append(f"{column}: {exc}")
+            else:
+                for column in work_item.pending_embedding_columns:
+                    spec = embedding_spec_map.get(column, {})
+                    try:
+                        pre_dim = (
+                            spec.get("pre_dim")
+                            if spec.get("pre_method") == "n"
+                            else None
+                        )
+                        response = await client.create_embedding(
+                            input_text=embedding_text,
+                            dimensions=pre_dim,
+                        )
+                        vector = _extract_embedding_vector(response)
+                        usage = _coerce_usage_dict(getattr(response, "usage", None))
+                        usage = _normalize_embedding_usage(usage)
+                        usage_total = _merge_usage(usage_total, usage)
+
+                        # ---後処理をする場合、得たベクトルを保存する
+                        post_method = spec.get("post_method")
+                        post_dim = spec.get("post_dim")
+                        if post_method and post_dim:
+                            embedding_vectors[column] = vector
+                            continue
+
+                        # ---後処理をしない場合、セルまたはファイルに出力する
+                        output_value = _prepare_embedding_output(
+                            vector,
+                            output_dir=config.output_dir,
+                            row_no=row_no_1based,
+                            embedding_index=embedding_index_map.get(column, 1),
+                            force_file=bool(spec.get("file_output")),
+                        )
+                        updates[column] = output_value
+                    except Exception as exc:
+                        errors.append(f"{column}: {exc}")
+
         error_msg = "; ".join(errors) if errors else None
         error_type = "PartialError" if errors else None
         return RowResult(
@@ -220,6 +289,7 @@ async def process_row_async(
             error=error_msg,
             error_type=error_type,
             generation_ids=generation_ids,
+            embedding_vectors=embedding_vectors,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("行 %s の処理に失敗しました: %s", work_item.row_index, exc)
@@ -230,6 +300,7 @@ async def process_row_async(
             error=str(exc),
             error_type=exc.__class__.__name__,
             generation_ids=[],
+            embedding_vectors={},
         )
 
 
@@ -276,10 +347,14 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     structured_columns = classification.structured_columns
     ns_columns = classification.nonstructured_columns
     nsof_index_map = classification.nsof_index_map
+    embedding_columns = classification.embedding_columns
+    embedding_spec_map = classification.embedding_spec_map
+    embedding_index_map = classification.embedding_index_map
     work_items = _collect_work_items(
         df,
         structured_columns=structured_columns,
         ns_columns=ns_columns,
+        embedding_columns=embedding_columns,
         start_row_index=start_row_index,
         max_rows=config.max_rows,
     )
@@ -323,6 +398,8 @@ async def run_async(config: AppConfig, api_key: str) -> None:
                 client=client,
                 config=config,
                 nsof_index_map=nsof_index_map,
+                embedding_spec_map=embedding_spec_map,
+                embedding_index_map=embedding_index_map,
                 preprocessors=preprocessors,
             )
 
@@ -332,6 +409,7 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     chunk_first_row: int | None = None
     chunk_last_row: int | None = None
     new_generation_ids_run: list[str] = []
+    embedding_reduction_inputs: dict[str, dict[int, list[float]]] = {}
 
     # ---処理結果を取得する
     for future in tqdm(
@@ -365,6 +443,13 @@ async def run_async(config: AppConfig, api_key: str) -> None:
             )
             new_generation_ids_run.extend(result.generation_ids)
 
+        # ---後処理対象の埋め込みベクトルを、embedding_reduction_inputs に追加する
+        if result.embedding_vectors:
+            for column, vector in result.embedding_vectors.items():
+                embedding_reduction_inputs.setdefault(column, {})[
+                    result.row_index
+                ] = vector
+
         # ---部分的な保存のため、処理範囲を更新する
         chunk_first_row = (
             result.row_index
@@ -382,6 +467,16 @@ async def run_async(config: AppConfig, api_key: str) -> None:
             reader.save_partial(df, chunk_first_row, chunk_last_row)
             chunk_first_row = None
             chunk_last_row = None
+
+    # ---後処理対象の埋め込みベクトルを、実際に後処理し、DFを更新する
+    if embedding_reduction_inputs:
+        _apply_embedding_reductions(
+            df=df,
+            embedding_vectors=embedding_reduction_inputs,
+            embedding_spec_map=embedding_spec_map,
+            embedding_index_map=embedding_index_map,
+            output_dir=reader.output_dir,
+        )
 
     if chunk_first_row is not None and chunk_last_row is not None:
         reader.save_partial(df, chunk_first_row, chunk_last_row)
@@ -443,6 +538,8 @@ def _classify_columns(df: pd.DataFrame) -> ColumnClassification:
     label_columns: list[str] = []
     embedding_columns: list[str] = []
     embedding_spec_map: dict[str, dict[str, Any]] = {}
+    embedding_index_map: dict[str, int] = {}
+    embedding_counter = 0
     errors: list[str] = []
 
     for col in df.columns:
@@ -478,6 +575,8 @@ def _classify_columns(df: pd.DataFrame) -> ColumnClassification:
             try:
                 embedding_spec_map[col] = _parse_embedding_column(col)
                 embedding_columns.append(col)
+                embedding_counter += 1
+                embedding_index_map[col] = embedding_counter
             except ValueError as exc:  # noqa: BLE001
                 errors.append(str(exc))
             continue
@@ -502,6 +601,7 @@ def _classify_columns(df: pd.DataFrame) -> ColumnClassification:
         label_columns=label_columns,
         embedding_columns=embedding_columns,
         embedding_spec_map=embedding_spec_map,
+        embedding_index_map=embedding_index_map,
     )
 
 
@@ -535,24 +635,40 @@ def _validate_structured_property_names(columns: Iterable[str]) -> None:
 
 
 def _parse_embedding_column(column: str) -> dict[str, Any]:
-    """eo* 列名をパースし、method/dim/file_output を返す。未対応形式ならエラー。"""
+    """eo* 列名をパースし、前段/後段の次元指定とファイル出力を返す。"""
 
     pattern = re.compile(
-        r"^eo(?:(?P<method>[nptu])(?P<dim>\d+))?(?P<fileflag>f)?$", re.IGNORECASE
+        r"^eo"
+        r"(?:(?P<pre_method>n)(?P<pre_dim>\d+)?)?"
+        r"(?:(?P<post_method>[ptu])(?P<post_dim>\d+))?"
+        r"(?P<fileflag>f)?$",
+        re.IGNORECASE,
     )
     match = pattern.match(column)
     if not match:
         raise ValueError(
-            f"埋め込み列の形式が不正です: {column} (例: eo / eof / eon1536 / eon1536f)"
+            f"埋め込み列の形式が不正です: {column} "
+            "(例: eo / eof / eon1536 / eop128 / eon1536p128f)"
         )
 
-    method = match.group("method")
-    dim = match.group("dim")
+    pre_method = match.group("pre_method")
+    pre_dim = match.group("pre_dim")
+    post_method = match.group("post_method")
+    post_dim = match.group("post_dim")
     file_output = match.group("fileflag") is not None
 
+    if pre_dim is not None and int(pre_dim) <= 0:
+        raise ValueError(f"埋め込み列の次元数が不正です: {column}")
+    if post_dim is not None and int(post_dim) <= 0:
+        raise ValueError(f"埋め込み列の次元数が不正です: {column}")
+    if post_method and not post_dim:
+        raise ValueError(f"埋め込み列の後段次元指定が不正です: {column}")
+
     return {
-        "method": method.lower() if method else None,
-        "dim": int(dim) if dim else None,
+        "pre_method": pre_method.lower() if pre_method else None,
+        "pre_dim": int(pre_dim) if pre_dim else None,
+        "post_method": post_method.lower() if post_method else None,
+        "post_dim": int(post_dim) if post_dim else None,
         "file_output": file_output,
     }
 
@@ -562,6 +678,7 @@ def _collect_work_items(
     *,
     structured_columns: Sequence[str],
     ns_columns: Sequence[str],
+    embedding_columns: Sequence[str],
     start_row_index: int,
     max_rows: int | None,
 ) -> list[RowWorkItem]:
@@ -571,6 +688,7 @@ def _collect_work_items(
         df: スプレッドシート全体の DataFrame。
         structured_columns: 構造化出力列名のシーケンス。
         ns_columns: 非構造化出力列名のシーケンス。
+        embedding_columns: 埋め込み列名のシーケンス。
         start_row_index: 探索を開始する行インデックス（再開用）。
         max_rows: この実行で処理する最大行数。制限なしは ``None``。
 
@@ -583,12 +701,14 @@ def _collect_work_items(
         row = df.iloc[row_index]
         pending_structured = _get_pending_columns(row, structured_columns)
         pending_ns = _get_pending_columns(row, ns_columns)
-        if pending_structured or pending_ns:
+        pending_embedding = _get_pending_columns(row, embedding_columns)
+        if pending_structured or pending_ns or pending_embedding:
             work_items.append(
                 RowWorkItem(
                     row_index=row_index,
                     pending_structured_columns=pending_structured,
                     pending_ns_columns=pending_ns,
+                    pending_embedding_columns=pending_embedding,
                 )
             )
             if max_rows is not None and len(work_items) >= max_rows:
@@ -793,6 +913,90 @@ def _strip_cost_keys(usage: dict[str, Any] | None) -> dict[str, Any] | None:
     return cleaned
 
 
+def _normalize_embedding_usage(
+    usage: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """埋め込みレスポンスの usage を集計しやすい形に整形する。"""
+
+    if usage is None:
+        return None
+    normalized = dict(usage)
+    if "total_cost" not in normalized and "cost" in normalized:
+        normalized["total_cost"] = normalized.get("cost")
+    return normalized
+
+
+def _build_embedding_text(targets: Sequence[Target]) -> str:
+    """埋め込み用の入力テキストを構築する。"""
+
+    text_parts = [target.text for target in targets if isinstance(target, TextTarget)]
+    if not text_parts:
+        raise ValueError("埋め込み用のテキストが存在しません。")
+    return "\n\n".join(text_parts)
+
+
+def _extract_embedding_vector(response: Any) -> list[float]:
+    """埋め込み API のレスポンスからベクトルを取り出す。"""
+
+    data = getattr(response, "data", None)
+    if not data:
+        raise ValueError("埋め込み応答に data が含まれていません。")
+    first = data[0]
+    embedding = getattr(first, "embedding", None)
+    if embedding is None and isinstance(first, dict):
+        embedding = first.get("embedding")
+    if embedding is None:
+        raise ValueError("埋め込み応答に embedding が含まれていません。")
+    return list(embedding)
+
+
+def _serialize_embedding_vector(vector: Sequence[float]) -> str:
+    """埋め込みベクトルをセル書き込み用にシリアライズする。"""
+    # テキストを小さくするため、カンマとコロンのみを使用(不要なスペースを削除)
+    return json.dumps(list(vector), ensure_ascii=False, separators=(",", ":"))
+
+
+def _write_embedding_file(path: Path, vector: Sequence[float]) -> None:
+    """埋め込みベクトルをファイルへ保存する。"""
+
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = np.asarray(vector, dtype="float32")
+    np.save(path, array)
+
+
+def _build_eof_filename(*, embedding_index: int, row_no: int) -> str:
+    """埋め込みベクトル出力ファイルの名前を生成する。"""
+
+    return f"eof{embedding_index}_{row_no}.{EMBEDDING_FILE_EXT}"
+
+
+def _prepare_embedding_output(
+    vector: Sequence[float],
+    *,
+    output_dir: Path,
+    row_no: int,
+    embedding_index: int,
+    force_file: bool,
+) -> str:
+    """埋め込みベクトルをセルまたはファイルへ出力する。"""
+
+    serialized = _serialize_embedding_vector(vector)
+    if not force_file and len(serialized) <= EMBEDDING_CELL_CHAR_LIMIT:
+        return serialized
+
+    filename = _build_eof_filename(embedding_index=embedding_index, row_no=row_no)
+    output_path = (output_dir / filename).resolve()
+    _write_embedding_file(output_path, vector)
+    if not force_file:
+        logger.info(
+            "埋め込み出力が長すぎるためファイル出力にフォールバックしました: %s",
+            filename,
+        )
+    return filename
+
+
 def _parse_ns_prompt(column: str) -> str:
     """nso_/nsof_ 列ヘッダーからプロンプト文を抽出する。"""
 
@@ -855,6 +1059,127 @@ def _merge_usage(
             add.get(cost_key, 0.0) or 0.0
         )
     return merged
+
+
+def _apply_embedding_reductions(
+    *,
+    df: pd.DataFrame,
+    embedding_vectors: dict[str, dict[int, list[float]]],
+    embedding_spec_map: dict[str, dict[str, Any]],
+    embedding_index_map: dict[str, int],
+    output_dir: Path,
+) -> None:
+    """後段の次元削減を実行して DataFrame を更新する。
+    
+    Args:
+        df: DataFrame
+        embedding_vectors: 後処理用の埋め込みベクトル ( {列名: {行インデックス: 埋め込みベクトル}} )
+        embedding_spec_map: 埋め込み列の仕様 ( {列名: {post_method: 後処理方法, post_dim: 後処理次元, file_output: ファイル出力フラグ}} )
+        embedding_index_map: 埋め込み列に対する 1 始まりのインデックス
+        output_dir: 出力ディレクトリ
+    """
+
+    for column, row_vectors in embedding_vectors.items():
+        spec = embedding_spec_map.get(column, {})
+        post_method = spec.get("post_method")
+        post_dim = spec.get("post_dim")
+        if not post_method or not post_dim:
+            continue
+
+        row_indices = sorted(row_vectors.keys())
+        vectors = [row_vectors[row_index] for row_index in row_indices] # forでその列の埋め込みベクトルをすべて取得
+        try:
+            # ---後処理(次元削減)を実行する
+            reduced_vectors = _reduce_embeddings(
+                vectors, method=str(post_method), dim=int(post_dim)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "埋め込みの後段次元削減に失敗しました: %s (%s)", column, exc
+            )
+            continue
+
+        # ---後処理後の埋め込みベクトルを、セルまたはファイルに出力する
+        for offset, row_index in enumerate(row_indices):
+            output_value = _prepare_embedding_output(
+                reduced_vectors[offset], # row_indexは行番号なだけ。順番にはなっていない可能性があるので、offsetを使う
+                output_dir=output_dir,
+                row_no=row_index + 1,
+                embedding_index=embedding_index_map.get(column, 1),
+                force_file=bool(spec.get("file_output")),
+            )
+            df.loc[row_index, column] = output_value # 後処理後の埋め込みベクトルを、DataFrameに書き込む
+
+
+def _reduce_embeddings(
+    vectors: Sequence[Sequence[float]],
+    *,
+    method: str,
+    dim: int,
+) -> list[list[float]]:
+    """埋め込みベクトルを指定の手法で次元削減する。"""
+
+    import numpy as np
+
+    # ---前確認
+    if dim <= 0:
+        raise ValueError("後段次元数が不正です。")
+    matrix = np.asarray(vectors, dtype="float32")
+    if matrix.ndim != 2 or matrix.size == 0:
+        raise ValueError("埋め込みベクトルが空です。")
+    n_samples, n_features = matrix.shape
+    if dim > n_features:
+        raise ValueError("後段次元数が元の次元数を超えています。")
+
+    method = method.lower()
+    if method == "p": # PCA
+        if n_samples < 2:
+            logger.warning("PCA を実行できないため先頭切り出しで代替します。")
+            return _truncate_embeddings(matrix, dim)
+        from sklearn.decomposition import PCA
+
+        reducer = PCA(n_components=dim, random_state=0)
+        reduced = reducer.fit_transform(matrix)
+        return reduced.astype("float32").tolist()
+    if method == "t": # t-SNE
+        if n_samples < 2:
+            logger.warning("t-SNE を実行できないため先頭切り出しで代替します。")
+            return _truncate_embeddings(matrix, dim)
+        from sklearn.manifold import TSNE
+
+        perplexity = min(30, max(1, n_samples - 1))
+        reducer = TSNE(
+            n_components=dim,
+            perplexity=perplexity,
+            random_state=0,
+            init="pca",
+        )
+        reduced = reducer.fit_transform(matrix)
+        return reduced.astype("float32").tolist()
+    if method == "u": # UMAP
+        if n_samples < 3:
+            logger.warning("UMAP を実行できないため先頭切り出しで代替します。")
+            return _truncate_embeddings(matrix, dim)
+        import umap
+
+        n_neighbors = min(15, n_samples - 1)
+        reducer = umap.UMAP(
+            n_components=dim,
+            n_neighbors=n_neighbors,
+            random_state=0,
+        )
+        reduced = reducer.fit_transform(matrix)
+        return reduced.astype("float32").tolist()
+
+    raise ValueError(f"未対応の後段次元削減方式です: {method}")
+
+
+def _truncate_embeddings(matrix: np.ndarray, dim: int) -> list[list[float]]:
+    """埋め込みを先頭から切り出して指定次元に合わせる。"""
+
+    if dim > matrix.shape[1]:
+        raise ValueError("後段次元数が元の次元数を超えています。")
+    return matrix[:, :dim].astype("float32").tolist()
 
 
 def _guess_target_file_stem(

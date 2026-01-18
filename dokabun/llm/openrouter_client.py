@@ -141,6 +141,52 @@ class AsyncOpenRouterClient:
                 await asyncio.sleep(delay)
                 delay *= 2
 
+    async def create_embedding(
+        self,
+        *,
+        input_text: str | Sequence[str],
+        dimensions: int | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        """埋め込み API を実行する。
+
+        Args:
+            input_text: 埋め込み対象の入力テキスト。
+            dimensions: 次元数を指定する場合に指定。None ならモデル既定値。
+            extra_headers: OpenRouter に追加で渡すヘッダ。
+
+        Returns:
+            Any: OpenAI SDK が返すレスポンスオブジェクト。
+        """
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": input_text,
+            "extra_headers": extra_headers or {},
+        }
+        if self._is_openrouter:
+            payload["extra_body"] = {"usage": {"include": True}}
+        if dimensions is not None:
+            payload["dimensions"] = dimensions
+
+        attempt = 0
+        delay = 1.0
+        while True:
+            try:
+                return await self.client.embeddings.create(**payload)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                attempt += 1
+                if attempt > self.max_retries:
+                    logger.error("OpenRouter 埋め込み呼び出しが失敗しました: %s", exc)
+                    raise
+                logger.warning(
+                    "OpenRouter 埋め込み呼び出しに失敗しました。再試行します (%s/%s)",
+                    attempt,
+                    self.max_retries,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+
     async def fetch_generation_cost(self, generation_id: str) -> float | None:
         """GET /generation で合計コスト (USD) を取得する。
 

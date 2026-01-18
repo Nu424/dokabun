@@ -11,7 +11,9 @@ dependencies = [
     "pandas>=2.3.3",
     "python-dateutil>=2.9.0.post0",
     "python-dotenv>=1.2.1",
+    "scikit-learn",
     "tqdm>=4.67.1",
+    "umap-learn",
 ]
 
 [build-system]
