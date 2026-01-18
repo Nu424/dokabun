@@ -114,7 +114,14 @@ class SpreadsheetReaderWriter:
         logger.info("最終結果を保存しました: %s", self.paths.output_path)
         return self.paths.output_path
 
-    def save_partial(self, df: pd.DataFrame, start_row: int, end_row: int) -> Path:
+    def save_partial(
+        self,
+        df: pd.DataFrame,
+        start_row: int,
+        end_row: int,
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> Path:
         """途中経過を一時ファイルとして保存する。
 
         Args:
@@ -130,7 +137,7 @@ class SpreadsheetReaderWriter:
         partial_path = self.output_dir / partial_name
         df.to_excel(partial_path, index=False)
         logger.info("一時ファイルを保存しました: %s", partial_path)
-        self.save_meta({"last_completed_row": end_row})
+        self.save_meta(meta or {"last_completed_row": end_row})
         return partial_path
 
     def save_meta(self, meta: dict[str, Any]) -> None:
