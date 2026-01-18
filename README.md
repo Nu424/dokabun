@@ -49,6 +49,7 @@
    - `input_YYYYMMDD_HHMMSS.meta.json` … 再開用メタデータ
    - `input_YYYYMMDD_HHMMSS.generations.jsonl` … LLM 呼び出しの generation_id ログ
    - `input_YYYYMMDD_HHMMSS.generation_costs.jsonl` … `/generation` 再取得キャッシュ
+   - `eof{index}_{row}.npy` … 埋め込みベクトル（`eof` / フォールバック時）
 
    メタファイルが存在する場合、CLI は最新タイムスタンプを自動で選択し途中再開します。  
    新規実行したい場合は `--timestamp` を指定するか、既存メタファイルを削除してください。
@@ -127,9 +128,43 @@
   - `t_` 列が 1 つで、セルが実在ファイルパスなら `{target_file_stem}_nsf{index}.txt` を採用
     - 例: `text01.txt` -> `text01_nsof1.txt`
 
-### 埋め込み出力列 (`eo_`, `eof_`, `eo{method}{dim}_`, `eo{method}{dim}f_`)
+### 埋め込み出力列 (`eo*`)
 
-- 埋め込み(Embedding)を作成します。現状は未実装です。
+`eo` で始まる列は **埋め込み(Embedding)ベクトル**を作成して出力します。
+
+- **前提**: `--model` は埋め込み対応モデルを指定してください（例: `openai/text-embedding-3-small`）。  
+  ※ `--model` をチャット補完と埋め込みで共用しているため、同一実行で両方やる場合はモデル選択に注意してください。
+- **埋め込み入力**: `i_` 列のうち `TextTarget` になったものを左→右で連結（区切りは `\n\n`）。画像は埋め込み入力から除外されます。
+
+#### 列名の指定方法（次元・後処理・ファイル出力）
+
+- **基本**
+  - `eo`: 埋め込みベクトルをセルに JSON で出力（例: `[0.1,0.2,...]`）
+  - `eof`: 埋め込みベクトルをファイルに出力し、セルにはファイル名（`output_dir` 相対）を書き込み
+- **前段階（埋め込みAPIの標準機能）で次元指定**
+  - `eon1536`: `dimensions=1536` を指定して埋め込み生成
+- **後段階（全行の結果が出揃ってから）で次元削減**
+  - `eop128`: PCA で 128 次元に削減
+  - `eot2`: t-SNE で 2 次元に削減
+  - `eou2`: UMAP で 2 次元に削減
+- **前段 + 後段の併用**
+  - `eon1536p128`: `dimensions=1536` → PCA で 128 次元
+  - `eon1536p128f`: 上記 + ファイル出力
+
+#### 出力形式（セル直書き / ファイル）
+
+- **セル直書き（`f` なし）**: JSON 文字列でセルに書き込みます。
+- **ファイル出力（`f` あり）**: 常にファイルに保存し、セルにはファイル名を書き込みます。
+- **フォールバック**: `f` なしでも、セルの最大文字数（目安: 32767）を超える場合は自動的にファイル出力にフォールバックします。
+- **ファイル形式/命名**:
+  - 形式: NumPy `.npy`（float32）
+  - 命名: `eof{index}_{row}.npy`（`index` は `eo*` 列の左→右の 1 始まり、`row` は DataFrame 行番号の 1 始まり）
+
+#### 実行例
+
+```bash
+python -m dokabun -i examples/sample.csv --model openai/text-embedding-3-small
+```
 
 `examples/sample.csv` には最小構成のサンプルが含まれています。
 
