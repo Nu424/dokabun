@@ -179,7 +179,15 @@ def reduce_embeddings(
         if n_samples < 3:
             logger.warning("UMAP を実行できないため先頭切り出しで代替します。")
             return truncate_embeddings(matrix, dim)
-        import umap
+        try:
+            import umap
+        except ImportError:
+            logger.warning(
+                "UMAP を利用するには `umap-learn` の追加インストールが必要です。"
+                "（例: `uv sync --extra umap` / `uvx --from . \"dokabun[umap]\" ...`）"
+                "先頭切り出しで代替します。"
+            )
+            return truncate_embeddings(matrix, dim)
 
         n_neighbors = min(15, n_samples - 1)
         reducer = umap.UMAP(

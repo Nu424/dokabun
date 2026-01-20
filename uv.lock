@@ -1,6 +1,6 @@
 version = 1
-revision = 3
-requires-python = ">=3.12"
+revision = 2
+requires-python = ">=3.10"
 
 [[package]]
 name = "annotated-types"
@@ -64,6 +64,10 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "scikit-learn" },
     { name = "tqdm" },
+]
+
+[package.optional-dependencies]
+umap = [
     { name = "umap-learn" },
 ]
 
@@ -77,8 +81,9 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "scikit-learn" },
     { name = "tqdm", specifier = ">=4.67.1" },
-    { name = "umap-learn" },
+    { name = "umap-learn", marker = "extra == 'umap'", specifier = ">=0.5.11" },
 ]
+provides-extras = ["umap"]
 
 [[package]]
 name = "et-xmlfile"

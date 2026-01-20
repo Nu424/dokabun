@@ -27,7 +27,12 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "scikit-learn",
     "tqdm>=4.67.1",
-    "umap-learn",
+]
+
+[project.optional-dependencies]
+# UMAP-based dimensionality reduction for `eo*` post-processing (e.g. `eou2`).
+umap = [
+    "umap-learn>=0.5.11",
 ]
 
 [project.urls]
