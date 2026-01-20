@@ -104,6 +104,33 @@ uv sync --extra umap
 uvx --from . "dokabun[umap]" -i examples/sample.csv --model openai/text-embedding-3-small
 ```
 
+#### 埋め込み可視化 CLI（追加インストール）
+
+埋め込みベクトル列（セル内の `"[x,y]"` 形式、または `.npy` ファイル名）を Plotly で可視化します。
+
+- `uv` でプロジェクト環境に入れる場合:
+
+```bash
+uv sync --extra viz
+```
+
+- `uvx` でGitHubから直接実行する場合:
+
+```bash
+uvx --from git+https://github.com/Nu424/dokabun[viz] dokabun-viz -i path/to/input_YYYYMMDD_HHMMSS.out.xlsx --embedding-col eot2 --label-col l_id
+```
+
+- `uvx` でその場実行する場合（ローカルリポジトリ）:
+
+```bash
+uvx --from ".[viz]" dokabun-viz -i path/to/input_YYYYMMDD_HHMMSS.out.xlsx --embedding-col eot2 --label-col l_id
+```
+
+- 補足:
+  - 次元は自動判定され、2次元/3次元のみ対応（4次元以上はエラー）。
+  - ホバー表示は `--hover-col` で指定可能。未指定時は `i_` の先頭列を使用。
+  - ホバー表示文字数は `--hover-max-chars` で制限可能。
+
 #### 主なオプション
 
 | オプション | 説明 |
