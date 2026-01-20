@@ -26,13 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="dokabun",
-        description="スプレッドシートを入力として LLM で未入力セルを埋めるツール",
+        description="スプシをインターフェースとして、LLMにどかっと分析させるツール",
     )
     parser.add_argument(
         "-i",
         "--input",
         required=True,
         help="入力スプレッドシートのパス (.xlsx / .csv)",
+    )
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=None,
+        help="API キー（未指定時は OPENROUTER_API_KEY/OPENAI_API_KEY を参照）",
     )
     parser.add_argument(
         "--model", default="openai/gpt-4.1-mini", help="使用するモデル名"
@@ -132,10 +138,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     configure_logging(config.log_level, config.log_file)
-    api_key = _load_api_key()
+    api_key = args.api_key or _load_api_key()
     if not api_key:
         print(
-            "OPENROUTER_API_KEY が設定されていません。環境変数を確認してください。",
+            "API キーが指定されていません。--api-key または "
+            "OPENROUTER_API_KEY/OPENAI_API_KEY を設定してください。",
             file=sys.stderr,
         )
         return 1

@@ -1,8 +1,22 @@
 [project]
 name = "dokabun"
 version = "0.1.0"
-description = "Add your description here"
+description = "Spreadsheet-driven CLI to populate LLM outputs. / スプシをインターフェースとして、LLMにどかっと分析させるツール"
 readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Nu424" },
+]
+keywords = ["llm", "openrouter", "spreadsheet", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
 requires-python = ">=3.12"
 dependencies = [
     "openai>=2.8.1",
@@ -15,6 +29,13 @@ dependencies = [
     "tqdm>=4.67.1",
     "umap-learn",
 ]
+
+[project.urls]
+Repository = "https://github.com/Nu424/dokabun"
+Issues = "https://github.com/Nu424/dokabunissues"
+
+[project.scripts]
+dokabun = "dokabun.cli:main"
 
 [build-system]
 requires = ["hatchling"]
