@@ -9,6 +9,12 @@ from typing import Optional
 _configured = False
 _log_file_path: Optional[Path] = None
 _file_handler: Optional[logging.Handler] = None
+_NOISY_LIBRARY_LOGGERS: dict[str, str] = {
+    # httpx は root logger が INFO の場合に各リクエストを INFO で出力するため、
+    # tqdm の進捗表示を崩す原因になりやすい。必要時は呼び出し側で明示的に調整する。
+    "httpx": "WARNING",
+    "httpcore": "WARNING",
+}
 
 
 def configure_logging(level: str = "INFO", log_file: Optional[Path] = None) -> None:
@@ -27,6 +33,7 @@ def configure_logging(level: str = "INFO", log_file: Optional[Path] = None) -> N
     if _configured:
         root_logger.setLevel(level_value)
         _configure_file_handler(root_logger, log_file)
+        _configure_library_loggers()
         return
 
     root_logger.setLevel(level_value)
@@ -38,6 +45,7 @@ def configure_logging(level: str = "INFO", log_file: Optional[Path] = None) -> N
     root_logger.addHandler(stream_handler)
 
     _configure_file_handler(root_logger, log_file, formatter)
+    _configure_library_loggers()
 
     _configured = True
 
@@ -86,6 +94,16 @@ def _build_formatter() -> logging.Formatter:
         fmt="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def _configure_library_loggers() -> None:
+    """外部ライブラリのロガーを調整する。
+
+    ルートロガーを INFO にしても、進捗表示などを邪魔しやすいログを抑制する。
+    """
+
+    for logger_name, level in _NOISY_LIBRARY_LOGGERS.items():
+        logging.getLogger(logger_name).setLevel(level)
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -78,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="HTML 出力後にブラウザを開かない",
     )
+    parser.add_argument(
+        "--marker-size",
+        type=int,
+        default=15,
+        help="マーカーのサイズ (default: 15)",
+    )
     return parser
 
 
@@ -148,6 +154,7 @@ def run(args: argparse.Namespace) -> Path:
         title=title,
         color_scale=args.color_scale,
         color_seq=args.color_seq,
+        marker_size=args.marker_size,
     )
 
     # ---HTMLを出力する
@@ -180,7 +187,9 @@ def _resolve_column(df: pd.DataFrame, name: str, label: str) -> str:
         return name
 
     matches = [
-        col for col in df.columns if isinstance(col, str) and col.lower() == name.lower()
+        col
+        for col in df.columns
+        if isinstance(col, str) and col.lower() == name.lower()
     ]
     if len(matches) == 1:
         return matches[0]
@@ -236,7 +245,9 @@ def _collect_embedding_vectors(
         vectors.append(vector)
 
     if dim is None:
-        raise ValueError(f"埋め込み列 '{embedding_col}' に有効なベクトルが見つかりません。")
+        raise ValueError(
+            f"埋め込み列 '{embedding_col}' に有効なベクトルが見つかりません。"
+        )
 
     return dim, row_indices, vectors
 
@@ -360,6 +371,7 @@ def _build_plotly_figure(
     title: str,
     color_scale: str,
     color_seq: str,
+    marker_size: int = 15,
 ):
     """Plotly の Figure を構築する。"""
 
@@ -377,8 +389,9 @@ def _build_plotly_figure(
     else:
         color_kwargs["color_discrete_sequence"] = _resolve_color_sequence(color_seq, px)
 
+    fig = None
     if dim == 2:
-        return px.scatter(
+        fig = px.scatter(
             plot_df,
             x="x",
             y="y",
@@ -387,23 +400,27 @@ def _build_plotly_figure(
             title=title,
             **color_kwargs,
         )
-    return px.scatter_3d(
-        plot_df,
-        x="x",
-        y="y",
-        z="z",
-        color=label_col,
-        hover_name="_hover_text",
-        title=title,
-        **color_kwargs,
-    )
+    else:
+        fig = px.scatter_3d(
+            plot_df,
+            x="x",
+            y="y",
+            z="z",
+            color=label_col,
+            hover_name="_hover_text",
+            title=title,
+            **color_kwargs,
+        )
+
+    fig.update_traces(marker=dict(size=marker_size))
+    return fig
 
 
 def _resolve_color_scale(value: str, px: object) -> object:
     """連続カラースケールを解決する。"""
 
     text = value.strip()
-    if "," in text: # 色をカンマ区切りで複数指定した場合
+    if "," in text:  # 色をカンマ区切りで複数指定した場合
         parts = [part.strip() for part in text.split(",") if part.strip()]
         if parts:
             return parts
