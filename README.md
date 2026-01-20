@@ -5,54 +5,135 @@
 
 ## 使い方
 
-1. OpenRouter の API キーを取得し、環境変数に設定します。
+### ① スプレッドシートを用意する
 
-   ```powershell
-   setx OPENROUTER_API_KEY "sk-..."
-   ```
+ヘッダーのプレフィックスを使って、入力やAIへの指示を指定します。
 
-2. 依存パッケージをインストールし、CLI を実行します。
+##### シート作成例
 
-   ```bash
-   uv sync  # もしくは pip install -e .
-   python -m dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
-   ```
-   OpenAI 互換エンドポイントに切り替える例:
-   ```bash
-   python -m dokabun -i examples/sample.csv --model gpt-4o-mini --base-url https://api.openai.com/v1
-   ```
-   or (uv を使っている場合)
-   ```bash
-   uv run python -m dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
-   ```
+| i_content | so_summary\|本文の要約 | so_sentiment\|感情ラベル |
+| --- | --- | --- |
+| 今日はとても暑い一日でした。 | (空欄) | (空欄) |
+| 新商品のレビューを集めています。 | (空欄) | (空欄) |
 
-   主なオプション:
+##### プレフィックス一覧
 
-   | オプション | 説明 |
-   | --- | --- |
-   | `-i, --input` | 入力スプレッドシート (`.xlsx` または `.csv`) |
-   | `--model` | 使用するモデル名 (既定: `openai/gpt-4.1-mini`) |
-   | `--base-url` | LLM API のベース URL (既定: `https://openrouter.ai/api/v1`) |
-   | `--concurrency` | 同時並列数 (既定: 5) |
-   | `--partial-interval` | 何行ごとに一時保存するか |
-   | `--max-text-file-bytes` | テキストファイル読み込み時の最大サイズ（バイト）(既定: 262144) |
-   | `--timestamp` | 途中再開したいタイムスタンプを明示指定 |
+| プレフィックス | 説明 | 列名の入力例 | セル入力例と処理結果 | 注意点 |
+| :--- | :--- | :--- | :--- | :--- |
+| `i_` | **入力 (Input)**<br>分析対象のデータ | `i_content`<br>`i_画像ファイル` | `こんにちは` → (そのままテキストとして入力)<br>`docs/memo.txt` → (ファイル内容を展開して入力)<br>`images/image01.png` → (画像として入力) | 複数列ある場合は左から順に連結されます。<br>画像パスも自動認識されます。 |
+| `so_` | **構造化出力**<br>指定した形式で抽出 | `so_summary\|要約`<br>`so_感情` | (空欄) → `{"summary": "この文章は..." }`<br>(空欄) → `{"感情": "positive"}` | `\|` の後ろに説明を書くと精度が上がります。<br>空欄のセルのみ埋められます。 |
+| `nso_` | **テキスト出力(非構造化出力)**<br>自由記述で生成 | `nso_このテキストを翻訳してください`<br>`nso_この計画を評価してください。` | (空欄) → `Hello, world.` <br>(空欄) → `Good job!` | 列ごとに独立して生成されます。<br>列名の後ろ部分がプロンプトになります。 |
+| `nsof_` | **ファイル出力(非構造化出力のファイル出力)**<br>生成結果を別ファイルに保存 | `nsof_code`<br>`nsof_log` | (空欄) → `nsof1_2.txt` (生成内容はファイルへ保存) | セルには保存されたファイル名が入ります。 |
+| `eo` / `eof` | **埋め込み**<br>ベクトル化 | `eo`<br>`eof`<br>`eon1536t2` | (空欄) → `[0.1, 0.2, ...]` (JSON)<br>(空欄) → `eof1_2.npy` (NumPyファイル)<br>(空欄) → `[0.2, 0.3]` | `--model` に埋め込み対応モデルの指定が必要です。 |
+| `l_` | **ラベル (Label)**<br>メタデータ | `l_id`<br>`l_note` | `ID-001`<br>`確認済み` | LLMの入力には含まれず、処理に影響しません。 |
+
+詳細な仕様（ファイルパスの解決ルール、埋め込みの次元指定など）については、[スプレッドシート形式の詳細](#スプレッドシート形式の詳細)を参照してください。
+
+### ② 実行する
+
+**API キーの指定（推奨: 環境変数）**
+
+```powershell
+setx OPENROUTER_API_KEY "sk-..."
+```
+
+```bash
+export OPENROUTER_API_KEY="sk-..."
+```
+
+`--api-key` でも指定できます（シェル履歴に残りやすいので注意）。
+
+```bash
+uvx dokabun --api-key "sk-..." -i examples/sample.csv --model openai/gpt-4.1-mini
+```
+
+**実行方法（いずれか）**
+
+- **uvx（最もおすすめ。uvがあればインストール不要で実行可能！）**
+  ```bash
+  uvx --from git+https://github.com/Nu424/dokabun dokabun -i examples/sample.csv --model openai/gpt-4.1-mini --api-key "{OpenRouterのAPIキー}"
+  # uvx dokabun -i examples/sample.csv --model openai/gpt-4.1-mini # こちらも可能
+  ```
+  ローカルのリポジトリから試す場合:
+  ```bash
+  uvx --from . dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
+  ```
+  まずはヘルプ:
+  ```bash
+  uvx --from . dokabun --help
+  ```
+
+- **python -m（ローカル開発向け）**
+  ```bash
+  uv sync  # もしくは pip install -e .
+  python -m dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
+  ```
+
+- **uv run（プロジェクト内で実行）**
+  ```bash
+  uv sync
+  uv run dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
+  ```
+  `uv run python -m dokabun ...` でも実行できます。
+
+#### OpenAI 互換エンドポイントに切り替える例
+
+```bash
+uvx dokabun -i examples/sample.csv --model gpt-4o-mini --base-url https://api.openai.com/v1
+```
+
+#### 埋め込み列を使う場合のモデル例
+
+```bash
+uvx dokabun -i examples/sample.csv --model openai/text-embedding-3-small
+```
+
+#### UMAP（`eou*`）を使う場合（追加インストール）
+
+UMAP は `umap-learn`（内部で `numba/llvmlite` を利用）に依存するため、**任意機能**として切り出しています。
+
+- `uv` でプロジェクト環境に入れる場合:
+
+```bash
+uv sync --extra umap
+```
+
+- `uvx` でその場実行する場合（ローカルリポジトリ）:
+
+```bash
+uvx --from . "dokabun[umap]" -i examples/sample.csv --model openai/text-embedding-3-small
+```
+
+#### 主なオプション
+
+| オプション | 説明 |
+| --- | --- |
+| `-i, --input` | 入力スプレッドシート (`.xlsx` または `.csv`) |
+| `--api-key` | API キー（未指定時は環境変数を参照） |
+| `--model` | 使用するモデル名 (既定: `openai/gpt-4.1-mini`) |
+| `--base-url` | LLM API のベース URL (既定: `https://openrouter.ai/api/v1`) |
+| `--concurrency` | 同時並列数 (既定: 5) |
+| `--partial-interval` | 何行ごとに一時保存するか |
+| `--max-text-file-bytes` | テキストファイル読み込み時の最大サイズ（バイト）(既定: 262144) |
+| `--timestamp` | 途中再開したいタイムスタンプを明示指定 |
 | `--nsof-ext` | `nsof_` 列の出力拡張子 (`txt` / `md`) |
 | `--nsof-name-template` | `nsof_` 通常時のファイル名テンプレ |
 | `--nsof-name-template-filetarget` | `i_` が1列かつファイルパス時のファイル名テンプレ |
 
-3. 実行すると、`output_dir`（未指定時は入力ファイルと同じディレクトリ）に下記ファイルが出力されます。
+### 実行結果
 
-   - `input_YYYYMMDD_HHMMSS.xlsx` … 元ファイルのコピー
-   - `input_YYYYMMDD_HHMMSS.out.xlsx` … 処理後の最終出力
-   - `input_YYYYMMDD_HHMMSS.partial.*.xlsx` … 一時保存ファイル
-   - `input_YYYYMMDD_HHMMSS.meta.json` … 再開用メタデータ
-   - `input_YYYYMMDD_HHMMSS.generations.jsonl` … LLM 呼び出しの generation_id ログ
-   - `input_YYYYMMDD_HHMMSS.generation_costs.jsonl` … `/generation` 再取得キャッシュ
-   - `eof{index}_{row}.npy` … 埋め込みベクトル（`eof` / フォールバック時）
+実行すると、`output_dir`（未指定時は入力ファイルと同じディレクトリ）に下記ファイルが出力されます。
 
-   メタファイルが存在する場合、CLI は最新タイムスタンプを自動で選択し途中再開します。  
-   新規実行したい場合は `--timestamp` を指定するか、既存メタファイルを削除してください。
+- `input_YYYYMMDD_HHMMSS.xlsx` … 元ファイルのコピー
+- `input_YYYYMMDD_HHMMSS.out.xlsx` … 処理後の最終出力
+- `input_YYYYMMDD_HHMMSS.partial.*.xlsx` … 一時保存ファイル
+- `input_YYYYMMDD_HHMMSS.meta.json` … 再開用メタデータ
+- `input_YYYYMMDD_HHMMSS.generations.jsonl` … LLM 呼び出しの generation_id ログ
+- `input_YYYYMMDD_HHMMSS.generation_costs.jsonl` … `/generation` 再取得キャッシュ
+- `eof{index}_{row}.npy` … 埋め込みベクトル（`eof` / フォールバック時）
+
+メタファイルが存在する場合、CLI は最新タイムスタンプを自動で選択し途中再開します。  
+新規実行したい場合は `--timestamp` を指定するか、既存メタファイルを削除してください。
 
 ## 開発者向け: 実行フロー（関数呼び出し）
 
@@ -65,7 +146,7 @@
     - `load_dotenv()`（`.env` があれば読み込み）
     - `_build_config_from_args(args)` → `AppConfig.from_dict(...)`
       - `--timestamp` 未指定時は `_detect_latest_timestamp(...)` で `output_dir` 内の `*.meta.json` から最新を推定
-    - `configure_logging(...)` / `_load_api_key()`
+    - `configure_logging(...)` / `args.api_key` or `_load_api_key()`
     - _runner_
     - `dokabun.core.runner.run(config, api_key)`
       - `asyncio.run(run_async(config, api_key))`
@@ -107,34 +188,26 @@
 - ただし各セルは `_is_empty_value(...)` で「空」と判定されたときだけ埋めるため、同じ `timestamp` で再実行しても既存値は基本的に上書きしません。
 - LLM 呼び出しの **課金コストは `/generation` で後から確定**させるため、generation_id を JSONL で永続化し、実行末尾にまとめて再取得します。`--timestamp` を指定した再実行でもコストだけ再計算されます（行処理がなくてもコスト再計算だけ動きます）。
 
-## スプレッドシート形式
+## スプレッドシート形式の詳細
 
-- **入力列**: `i_` で始まる列を分析対象として扱います（大小文字不問）。複数ある場合は左から順にプロンプトへ渡されます。
-  - セルの値がテキストファイルパス（`.txt`, `.md`, `.markdown`, `.log`, `.csv`, `.json`, `.yml`, `.yaml`）の場合、そのファイルを読み込んで内容を LLM に渡します。
-  - セルの値が画像ファイルパス（`.png`, `.jpg`, `.jpeg`, `.webp`）の場合、その画像を LLM に渡します。
-  - それ以外はプレーンテキストとして扱います。
-  - ファイルパスはスプレッドシートファイルからの相対パスとして解釈されます。
-- **ラベル列**: `l_` で始まる列は処理に影響しません。後段の解析用メタデータとして利用できます。
-- **構造化出力列**: `so_{列名}[|説明]`
-  - JSON Schema のプロパティ名は `so_` を除去した `{列名}` を使用します。
-- LLM は空欄の出力列のみを埋めます。既に値が入っているセルは上書きしません。
+### 入力列 (`i_`) の詳細仕様
 
-### 非構造化出力列 (`ns_`, `nsf_`)
+- **テキストファイル**: 拡張子 `.txt`, `.md`, `.markdown`, `.log`, `.csv`, `.json`, `.yml`, `.yaml` を認識します。
+- **画像ファイル**: 拡張子 `.png`, `.jpg`, `.jpeg`, `.webp` を認識します。
+- **パス解決**: ファイルパスはスプレッドシートファイルからの相対パスとして解釈されます。
+- **複数列**: 複数ある場合は左から順にプロンプトへ渡されます。
 
-- `nso_{プロンプト}`: 列ごとに非構造化（プレーンテキスト）出力を生成し、セルへ書き込みます。まとめずに列単位で呼び出します。
-- `nsof_{プロンプト}`: 生成結果をファイルへ保存し、セルにはファイル名（`output_dir` 相対）を書き込みます。
+### 非構造化出力列 (`nso_`, `nsof_`) の詳細仕様
+
+- `nsof_{プロンプト}` のファイル保存名ルール:
   - デフォルト名: `nsf{index}_{行番号}.txt`（行番号はデータ行 1 始まり）
     - 例: `nsof1_1.txt`, `nsof1_2.txt`, `nsof1_3.txt`, ...
-  - `t_` 列が 1 つで、セルが実在ファイルパスなら `{target_file_stem}_nsf{index}.txt` を採用
+  - `i_` 列が 1 つだけで、その値が実在するファイルパスの場合: `{target_file_stem}_nsf{index}.txt` を採用します。
     - 例: `text01.txt` -> `text01_nsof1.txt`
 
-### 埋め込み出力列 (`eo*`)
+### 埋め込み出力列 (`eo*`) の詳細仕様
 
-`eo` で始まる列は **埋め込み(Embedding)ベクトル**を作成して出力します。
-
-- **前提**: `--model` は埋め込み対応モデルを指定してください（例: `openai/text-embedding-3-small`）。  
-  ※ `--model` をチャット補完と埋め込みで共用しているため、同一実行で両方やる場合はモデル選択に注意してください。
-- **埋め込み入力**: `i_` 列のうち `TextTarget` になったものを左→右で連結（区切りは `\n\n`）。画像は埋め込み入力から除外されます。
+- **埋め込み入力**: `i_` 列のうち `TextTarget` になったものを左→右で連結（区切りは `\n\n`）してベクトル化します。画像は除外されます。
 
 #### 列名の指定方法（次元・後処理・ファイル出力）
 
@@ -159,19 +232,6 @@
 - **ファイル形式/命名**:
   - 形式: NumPy `.npy`（float32）
   - 命名: `eof{index}_{row}.npy`（`index` は `eo*` 列の左→右の 1 始まり、`row` は DataFrame 行番号の 1 始まり）
-
-#### 実行例
-
-```bash
-python -m dokabun -i examples/sample.csv --model openai/text-embedding-3-small
-```
-
-`examples/sample.csv` には最小構成のサンプルが含まれています。
-
-| i_content | so_summary\|本文の要約 | so_sentiment\|感情ラベル |
-| --- | --- | --- |
-| 今日はとても暑い一日でした。 | (空欄) | (空欄) |
-| 新商品のレビューを集めています。 | (空欄) | (空欄) |
 
 ## テスト
 
