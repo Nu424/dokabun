@@ -6,6 +6,7 @@ import pytest
 from dokabun.config import AppConfig
 from dokabun.core.runner.columns import classify_columns
 from dokabun.core.runner.models import RowWorkItem, RunState
+from dokabun.core.runner.orchestrator import _prepare_output_columns_for_updates
 from dokabun.core.runner.row_processor import RowProcessor
 
 
@@ -212,3 +213,21 @@ def test_run_state_advances_only_contiguous():
     assert state.resume_cursor == 0
     state.mark_completed(1)
     assert state.resume_cursor == 2
+
+
+def test_prepare_output_columns_allows_string_updates_on_empty_excel_columns():
+    df = pd.DataFrame(
+        {
+            "i_content": ["input"],
+            "so_score": [float("nan")],
+            "nso_summary": [float("nan")],
+        }
+    )
+    assert str(df["so_score"].dtype) == "float64"
+
+    _prepare_output_columns_for_updates(df, ["so_score", "nso_summary"])
+    df.loc[0, "so_score"] = "1"
+    df.loc[0, "nso_summary"] = "done"
+
+    assert df.loc[0, "so_score"] == "1"
+    assert df.loc[0, "nso_summary"] == "done"

@@ -59,6 +59,14 @@ async def run_async(config: AppConfig, api_key: str) -> None:
     # ---処理対象・出力列をわけ、処理が必要な部分を抽出する
     df = reader.load()
     classification = classify_columns(df)
+    _prepare_output_columns_for_updates(
+        df,
+        [
+            *classification.structured_columns,
+            *classification.nonstructured_columns,
+            *classification.embedding_columns,
+        ],
+    )
     work_items = collect_work_items(
         df,
         structured_columns=classification.structured_columns,
@@ -288,6 +296,22 @@ def _build_resume_meta(run_state: RunState) -> dict[str, int]:
         "resume_cursor": run_state.resume_cursor,
         "last_completed_row": run_state.resume_cursor,
     }
+
+
+def _prepare_output_columns_for_updates(
+    df: pd.DataFrame, output_columns: list[str]
+) -> None:
+    """出力列を生成値の書き戻しに適した dtype にする。
+    すべての出力列のdtypeをobjectに変換する。
+    
+    Args:
+        df: データフレーム
+        output_columns: 出力列
+    """
+
+    for column in dict.fromkeys(output_columns): # 列名の重複を排除して、もとの順番通りに処理する
+        if column in df.columns and df[column].dtype != "object":
+            df[column] = df[column].astype("object") # columnのdtypeをobjectに変換する
 
 
 def _save_partial_with_resume(
