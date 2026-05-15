@@ -52,8 +52,17 @@ uvx dokabun --api-key "sk-..." -i examples/sample.csv --model openai/gpt-4.1-min
 - **uvx（最もおすすめ。uvがあればインストール不要で実行可能！）**
   ```bash
   uvx --from git+https://github.com/Nu424/dokabun dokabun -i examples/sample.csv --model openai/gpt-4.1-mini --api-key "{OpenRouterのAPIキー}"
-  # uvx dokabun -i examples/sample.csv --model openai/gpt-4.1-mini # こちらも可能
   ```
+
+  インストールしてから実行する場合:
+  ```bash
+  uv tool install "git+https://github.com/Nu424/dokabun"
+  ```
+
+  ```bash
+  dokabun -i examples/sample.csv --model openai/gpt-4.1-mini --api-key "{OpenRouterのAPIキー}"
+  ```
+
   ローカルのリポジトリから試す場合:
   ```bash
   uvx --from . dokabun -i examples/sample.csv --model openai/gpt-4.1-mini
